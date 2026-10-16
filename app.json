@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "Paddock Kinematics",
+    "slug": "paddock-kinematics",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "Automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.paddockkinematics.app"
+    },
+    "android": {
+      "package": "com.paddockkinematics.app"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    }
+  }
+}

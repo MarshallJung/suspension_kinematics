@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 410" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0B0F17" />
+      <stop offset="100%" stop-color="#111827" />
+    </linearGradient>
+    <marker id="arrowGreen2" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#10B981" />
+    </marker>
+    <marker id="arrowRed2" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#EF4444" />
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="880" height="410" rx="16" fill="url(#bg2)" stroke="#334155" stroke-width="2" />
+
+  <!-- Title -->
+  <text x="440" y="34" fill="#F8FAFC" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="900" text-anchor="middle">
+    FRONT-VIEW KINEMATICS: THE OVER-LOWERING ROLL CENTER TRAP (MACPHERSON STRUT)
+  </text>
+  <text x="440" y="54" fill="#94A3B8" font-family="system-ui, -apple-system, sans-serif" font-size="12" text-anchor="middle">
+    When Lower Control Arms (LCA) angle upward past horizontal, the Roll Center (z_rc) plunges underground faster than the CG drops
+  </text>
+
+  <!-- Center Divider -->
+  <line x1="440" y1="70" x2="440" y2="390" stroke="#334155" stroke-width="1.5" stroke-dasharray="6,6" />
+
+  <!-- ================= LEFT PANEL: OPTIMAL TRACK RIDE HEIGHT ================= -->
+  <rect x="22" y="72" width="400" height="318" rx="12" fill="#161F30" stroke="#10B981" stroke-width="1.5" />
+  <text x="222" y="96" fill="#10B981" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="800" text-anchor="middle">
+    A. OPTIMAL RIDE HEIGHT (LCA SLIGHTLY DOWNWARD)
+  </text>
+
+  <!-- Ground Line (z = 0) -->
+  <line x1="42" y1="305" x2="402" y2="305" stroke="#64748B" stroke-width="2" />
+  <text x="50" y="320" fill="#94A3B8" font-family="system-ui, -apple-system, sans-serif" font-size="10.5" font-weight="700">GROUND PLANE (z = 0 mm)</text>
+
+  <!-- Vehicle Centerline -->
+  <line x1="222" y1="115" x2="222" y2="355" stroke="#475569" stroke-width="1.4" stroke-dasharray="4,4" />
+
+  <!-- Left Tire & Strut -->
+  <rect x="74" y="215" width="28" height="90" rx="5" fill="#0B0F17" stroke="#94A3B8" stroke-width="2" />
+  <!-- Strut Axis & Top Mount -->
+  <line x1="92" y1="245" x2="118" y2="150" stroke="#38BDF8" stroke-width="3" />
+  <!-- Strut Normal Line (90 deg to telescopic strut) -->
+  <line x1="118" y1="150" x2="345" y2="212" stroke="#38BDF8" stroke-width="1.4" stroke-dasharray="3,3" />
+  <!-- Lower Control Arm (slopes downward outboard: inboard z higher than ball joint) -->
+  <line x1="92" y1="278" x2="170" y2="262" stroke="#F8FAFC" stroke-width="4" />
+  <circle cx="92" cy="278" r="4.5" fill="#F59E0B" />
+  <circle cx="170" cy="262" r="4.5" fill="#F59E0B" />
+  <!-- LCA Extension to FVIC -->
+  <line x1="170" y1="262" x2="345" y2="226" stroke="#F8FAFC" stroke-width="1.4" stroke-dasharray="3,3" />
+
+  <!-- FVIC Point -->
+  <circle cx="322" cy="231" r="5" fill="#38BDF8" />
+  <text x="332" y="228" fill="#38BDF8" font-family="system-ui, -apple-system, sans-serif" font-size="10.5" font-weight="800">FVIC</text>
+
+  <!-- Swing Arm Line from Tire Contact Patch (88, 305) to FVIC (322, 231) -->
+  <line x1="88" y1="305" x2="322" y2="231" stroke="#10B981" stroke-width="2.5" />
+
+  <!-- Center of Gravity (CG) at (222, 168) -->
+  <circle cx="222" cy="168" r="8" fill="#F59E0B" stroke="#0B0F17" stroke-width="2" />
+  <text x="236" y="166" fill="#F59E0B" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="800">h_CG = 465 mm</text>
+
+  <!-- Roll Center (RC) at intersection with Centerline (222, 263) -> Above Ground! -->
+  <circle cx="222" cy="263" r="6.5" fill="#10B981" stroke="#0B0F17" stroke-width="2" />
+  <text x="234" y="274" fill="#10B981" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="800">z_rc = +42 mm (Above Ground)</text>
+
+  <!-- Roll Moment Arm Arrow h_roll -->
+  <line x1="202" y1="168" x2="202" y2="263" stroke="#10B981" stroke-width="2.8" marker-start="url(#arrowGreen2)" marker-end="url(#arrowGreen2)" />
+  <text x="194" y="218" fill="#10B981" font-family="system-ui, -apple-system, sans-serif" font-size="11.5" font-weight="900" text-anchor="end">
+    h_roll = 423 mm
+  </text>
+
+  <text x="222" y="374" fill="#CBD5E1" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" text-anchor="middle">
+    ✓ Controlled Body Roll • Good Negative Camber Recovery in Bump
+  </text>
+
+  <!-- ================= RIGHT PANEL: OVER-LOWERED TRAP ================= -->
+  <rect x="458" y="72" width="400" height="318" rx="12" fill="#161F30" stroke="#EF4444" stroke-width="1.5" />
+  <text x="658" y="96" fill="#EF4444" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="800" text-anchor="middle">
+    B. OVER-LOWERED BY 30 mm (LCA ANGLES UPWARD!)
+  </text>
+
+  <!-- Ground Line (z = 0) -->
+  <line x1="478" y1="305" x2="838" y2="305" stroke="#64748B" stroke-width="2" />
+  <text x="486" y="320" fill="#94A3B8" font-family="system-ui, -apple-system, sans-serif" font-size="10.5" font-weight="700">GROUND PLANE (z = 0 mm)</text>
+
+  <!-- Vehicle Centerline -->
+  <line x1="658" y1="115" x2="658" y2="355" stroke="#475569" stroke-width="1.4" stroke-dasharray="4,4" />
+
+  <!-- Left Tire -->
+  <rect x="510" y="215" width="28" height="90" rx="5" fill="#0B0F17" stroke="#94A3B8" stroke-width="2" />
+  <!-- Strut Axis -->
+  <line x1="528" y1="245" x2="554" y2="162" stroke="#38BDF8" stroke-width="3" />
+  <!-- Lower Control Arm (Inboard pivot dropped 30mm with chassis -> slopes UPWARD toward ball joint!) -->
+  <line x1="528" y1="276" x2="606" y2="294" stroke="#EF4444" stroke-width="4" />
+  <circle cx="528" cy="276" r="4.5" fill="#F59E0B" />
+  <circle cx="606" cy="294" r="4.5" fill="#F59E0B" />
+  <!-- LCA Extension downward to low FVIC -->
+  <line x1="606" y1="294" x2="770" y2="332" stroke="#EF4444" stroke-width="1.4" stroke-dasharray="3,3" />
+
+  <!-- Swing Arm Line from Tire Contact Patch (524, 305) to subterranean RC / FVIC -->
+  <line x1="524" y1="305" x2="765" y2="345" stroke="#EF4444" stroke-width="2.5" />
+
+  <!-- Center of Gravity (CG) dropped by 30mm -> (658, 178) -->
+  <circle cx="658" cy="178" r="8" fill="#F59E0B" stroke="#0B0F17" stroke-width="2" />
+  <text x="672" y="176" fill="#F59E0B" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="800">h_CG = 435 mm (-30)</text>
+
+  <!-- Subterranean Roll Center (RC) at (658, 327) -> Underground! -->
+  <circle cx="658" cy="327" r="6.5" fill="#EF4444" stroke="#0B0F17" stroke-width="2" />
+  <text x="670" y="344" fill="#EF4444" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="800">z_rc = -25 mm (Underground!)</text>
+
+  <!-- Roll Moment Arm Arrow h_roll (LONGER!) -->
+  <line x1="638" y1="178" x2="638" y2="327" stroke="#EF4444" stroke-width="2.8" marker-start="url(#arrowRed2)" marker-end="url(#arrowRed2)" />
+  <text x="630" y="252" fill="#EF4444" font-family="system-ui, -apple-system, sans-serif" font-size="11.5" font-weight="900" text-anchor="end">
+    h_roll = 460 mm (+37!)
+  </text>
+
+  <text x="658" y="374" fill="#FCA5A5" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" text-anchor="middle">
+    ⚠ Longer Roll Lever Arm (+9% More Roll Torque) &amp; Positive Camber Loss!
+  </text>
+</svg>
