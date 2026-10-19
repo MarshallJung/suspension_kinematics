@@ -7,3 +7,11 @@ coverage/
 *.log
 *.rtf
 .DS_Store
+
+# Local-only configuration, caches and review artifacts
+.env
+.env.*
+!.env.example
+.cache/
+*.tsbuildinfo
+/review-artifacts/

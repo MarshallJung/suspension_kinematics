@@ -21,8 +21,10 @@ export interface DamperAnalysis {
 }
 
 /**
- * Maps 1–20 damper click setting to damping ratio zeta = C_wheel / C_crit.
- * Click 10 corresponds to ~0.38 critical damping (optimal track baseline ~0.35–0.45 for LS).
+ * Illustrative click-to-response mapping. The legacy "zeta" field names are
+ * retained for compatibility, but these are NOT measured damping ratios:
+ * actual zeta requires damper force/velocity data and effective corner mass.
+ * More clicks means firmer in this app only; real adjusters differ.
  */
 export function clicksToDampingRatio(clicks: number, wheelRateNmm: number, baselineRateNmm: number): number {
   const clampedClicks = Math.max(1, Math.min(20, clicks));
@@ -84,27 +86,19 @@ export function evaluateTransientDampers(
   if (driver.surfaceCondition === 'moderately_bumpy') bumpSeverity = 0.5;
   if (driver.surfaceCondition === 'curbs_and_bumps') bumpSeverity = 1.0;
 
-  // Optimal HS zeta is ~0.36; too stiff (>0.45) or too soft (<0.22) loses contact patch compliance over curbs
+  // Assumed teaching-profile centre. This is not a universal HS damping optimum.
   const frontHsDeviation = Math.abs(frontHsBumpZeta - 0.36);
   const rearHsDeviation = Math.abs(rearHsBumpZeta - 0.36);
 
-  // Excessive anti-dive (>40%) or anti-squat (>40%) also locks vertical link compliance over bumps (PDF Page 6 & 14)
-  const frontAntiDivePenalty =
-    phase === 'entry' && setup.frontAntiDivePct > 40
-      ? ((setup.frontAntiDivePct - 40) / 100) * 0.18
-      : 0;
-  const rearAntiSquatPenalty =
-    phase === 'exit' && setup.rearAntiSquatPct > 40
-      ? ((setup.rearAntiSquatPct - 40) / 100) * 0.18
-      : 0;
-
+  // No universal anti-geometry/binding threshold is assumed here. Geometry
+  // changes pitch reaction in loadTransfer; bump response needs measured data.
   const frontBumpComplianceFactor = Math.max(
     0.78,
-    1 - bumpSeverity * (frontHsDeviation * 0.38 + frontAntiDivePenalty)
+    1 - bumpSeverity * frontHsDeviation * 0.38
   );
   const rearBumpComplianceFactor = Math.max(
     0.78,
-    1 - bumpSeverity * (rearHsDeviation * 0.38 + rearAntiSquatPenalty)
+    1 - bumpSeverity * rearHsDeviation * 0.38
   );
 
   return {

@@ -6,6 +6,7 @@ import {
   DriverInputState,
   HandlingSymptomType,
   RankedAdjustmentRecommendation,
+  SimulationResult,
   VehicleSetup,
 } from './types';
 
@@ -28,7 +29,6 @@ interface CandidateAdjustmentBlueprint {
   physicalMechanism: string;
   equationReference: string;
   secondaryTradeoff: string;
-  basePriority: number;
 }
 
 const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
@@ -43,7 +43,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 94,
     buildPatch: (setup) => {
       if (setup.frontArbStiffnessNmPerDeg <= 120) return null;
       const next = Math.max(100, Math.round(setup.frontArbStiffnessNmPerDeg - 90));
@@ -66,7 +65,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 92,
     buildPatch: (setup) => {
       if (setup.rearArbStiffnessNmPerDeg >= 900) return null;
       const next = Math.min(950, Math.round(setup.rearArbStiffnessNmPerDeg + 90));
@@ -89,7 +87,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry', 'mid'],
-    basePriority: 93,
     buildPatch: (setup) => {
       if (setup.frontStaticCamberDeg <= -3.8) return null;
       const step = setup.frontStaticCamberDeg > -1.5 ? 0.8 : 0.5;
@@ -113,7 +110,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 91,
     buildPatch: (setup) => {
       if (setup.frontTireWidthMm >= setup.rearTireWidthMm + 10) return null;
       const nextWidth =
@@ -130,7 +126,7 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Enlarges the front contact patch footprint and raises the front tires’ nominal vertical load rating (F_z,nom), lowering contact stress (F_z / F_z,nom) under lateral load transfer and increasing front cornering stiffness (C_α,f) and peak lateral capacity (F_y,max,f).',
+      'In the illustrative tyre model, a wider front tyre scales its reference load and lateral capacity. Actual grip changes depend on tyre construction, compound, rim width, pressure and measured tyre data.',
     equationReference: 'F_z,nom,eff ∝ (W_tire,f / W_tire,ref)^1.35',
     secondaryTradeoff:
       'Requires checking front fender/strut clearance, wheel offset (scrub radius change), and slightly increases steering effort and aerodynamic frontal area.',
@@ -143,7 +139,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry'],
-    basePriority: 88,
     buildPatch: (setup) => {
       if (setup.frontStaticToeDeg <= -0.25) return null;
       const next = Number((setup.frontStaticToeDeg - 0.12).toFixed(2));
@@ -153,8 +148,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Pre-loads the inside wheel slip angle and enhances Ackermann turn-in geometry, sharpening initial turn-in response and reducing entry understeer compliance.',
-    equationReference: 'cot(δ_o) - cot(δ_i) = w / L',
+      'Changes the front wheels’ static toe offsets. This model adds an assumed toe-related slip bias; steering-linkage Ackermann geometry itself is unchanged and yaw response time is not solved.',
+    equationReference: 'δ_left/right = δ_steer ± δ_toe,total / 2 (static toe convention)',
     secondaryTradeoff:
       'Reduces straight-line high-speed stability (car feels darty on straights) and increases inner edge tire scrub.',
   },
@@ -166,7 +161,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['understeer'],
     applicablePhases: ['mid', 'exit'],
-    basePriority: 80,
     buildPatch: (setup) => {
       if (setup.rearStaticToeDeg <= 0.05) return null;
       const next = Number(Math.max(0, setup.rearStaticToeDeg - 0.12).toFixed(2));
@@ -179,7 +173,7 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       'Reduces rear understeer stabilizing slip angle (δ_RU), allowing the rear axle to rotate more freely through mid-corner and apex.',
     equationReference: 'α_r,eff = α_r - k_toe · δ_T,r',
     secondaryTradeoff:
-      'Reduces rear stability under heavy straight-line braking and fast direction changes; never run rear toe-out on RWD track cars.',
+      'May reduce rear stability under braking and direction changes; the appropriate toe range depends on the vehicle and measured compliance.',
   },
   {
     id: 'us_soften_front_ls_bump_damper',
@@ -189,7 +183,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry'],
-    basePriority: 89,
     buildPatch: (setup) => {
       if (setup.frontLsBumpClicks <= 3) return null;
       const next = Math.max(2, setup.frontLsBumpClicks - 3);
@@ -212,7 +205,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['understeer'],
     applicablePhases: ['exit'],
-    basePriority: 88,
     buildPatch: (setup) => {
       if (setup.frontLsReboundClicks >= 18) return null;
       const next = Math.min(19, setup.frontLsReboundClicks + 3);
@@ -235,8 +227,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['understeer'],
     applicablePhases: ['mid', 'exit'],
-    basePriority: 84,
     buildPatch: (setup) => {
+      if (setup.rearSpringRateNmm >= 220) return null;
       const nextRear = Math.min(220, setup.rearSpringRateNmm + 15);
       return {
         directionLabel: `Increase Rear Spring Rate (${setup.rearSpringRateNmm} → ${nextRear} N/mm)`,
@@ -257,13 +249,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['understeer'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 86,
     buildPatch: (setup) => {
-      const diff = setup.frontTirePressurePsi - setup.optimalTirePressurePsi;
-      const target =
-        Math.abs(diff) > 0.6
-          ? setup.optimalTirePressurePsi
-          : Number((setup.frontTirePressurePsi - 1.0).toFixed(1));
+      const target = setup.optimalTirePressurePsi;
       if (Math.abs(target - setup.frontTirePressurePsi) < 0.2) return null;
       return {
         directionLabel: `Set Front Hot Pressure (${setup.frontTirePressurePsi.toFixed(1)} → ${target.toFixed(1)} PSI)`,
@@ -271,7 +258,7 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Bleeding down an over-inflated hot front tire flattens the contact patch crown and maximizes cornering stiffness (C_α) up to the optimal inflation pressure.',
+      'Moves front pressure toward the assumed target supplied in the setup. This is an illustrative pressure-efficiency model; establish the actual target from tyre guidance and measured operating conditions.',
     equationReference: 'F_y = C_α(P_tire, F_z) · α',
     secondaryTradeoff:
       'Dropping too far below optimal pressure reduces sidewall stiffness and makes steering response feel vague.',
@@ -284,7 +271,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry'],
-    basePriority: 90,
     buildPatch: (_setup, driver) => {
       if (driver.trailBrakeOverlapPct > 65) {
         const next = 40;
@@ -319,7 +305,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'instability_braking'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 94,
     buildPatch: (setup) => {
       if (setup.frontArbStiffnessNmPerDeg >= 900) return null;
       const next = Math.min(950, Math.round(setup.frontArbStiffnessNmPerDeg + 90));
@@ -342,7 +327,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'poor_traction_exit'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 93,
     buildPatch: (setup) => {
       if (setup.rearArbStiffnessNmPerDeg <= 100) return null;
       const next = Math.max(80, Math.round(setup.rearArbStiffnessNmPerDeg - 90));
@@ -365,7 +349,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['oversteer'],
     applicablePhases: ['mid', 'exit'],
-    basePriority: 90,
     buildPatch: (setup) => {
       if (setup.rearStaticCamberDeg <= -3.4) return null;
       const next = Number((setup.rearStaticCamberDeg - 0.4).toFixed(1));
@@ -388,7 +371,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['oversteer', 'instability_braking'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 91,
     buildPatch: (setup) => {
       if (setup.rearStaticToeDeg >= 0.48) return null;
       const next = Number((setup.rearStaticToeDeg + 0.12).toFixed(2));
@@ -411,7 +393,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'instability_braking'],
     applicablePhases: ['entry'],
-    basePriority: 89,
     buildPatch: (setup) => {
       if (setup.rearLsReboundClicks <= 3) return null;
       const next = Math.max(2, setup.rearLsReboundClicks - 3);
@@ -434,7 +415,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'poor_traction_exit'],
     applicablePhases: ['exit'],
-    basePriority: 90,
     buildPatch: (setup) => {
       if (setup.rearLsBumpClicks <= 3) return null;
       const next = Math.max(2, setup.rearLsBumpClicks - 3);
@@ -457,7 +437,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['oversteer', 'instability_braking'],
     applicablePhases: ['entry'],
-    basePriority: 85,
     buildPatch: (setup) => {
       if (setup.lsdDecelLockPct >= 80) return null;
       const next = Math.min(85, setup.lsdDecelLockPct + 15);
@@ -480,7 +459,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'instability_braking'],
     applicablePhases: ['entry'],
-    basePriority: 87,
     buildPatch: (setup) => {
       if (setup.brakeBiasFrontPct >= 74) return null;
       const next = Math.min(75, setup.brakeBiasFrontPct + 3);
@@ -503,24 +481,19 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'poor_traction_exit'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 86,
     buildPatch: (setup) => {
-      const diff = setup.rearTirePressurePsi - setup.optimalTirePressurePsi;
-      const target =
-        Math.abs(diff) > 0.6
-          ? setup.optimalTirePressurePsi
-          : Number((setup.rearTirePressurePsi - 1.0).toFixed(1));
+      const target = setup.optimalTirePressurePsi;
       if (Math.abs(target - setup.rearTirePressurePsi) < 0.2) return null;
       return {
-        directionLabel: `Lower/Optimize Rear Hot Pressure (${setup.rearTirePressurePsi.toFixed(1)} → ${target.toFixed(1)} PSI)`,
+        directionLabel: `Set Rear Hot Pressure (${setup.rearTirePressurePsi.toFixed(1)} → ${target.toFixed(1)} PSI)`,
         setupPatch: { rearTirePressurePsi: target },
       };
     },
     physicalMechanism:
-      'Enlarges the rear tire contact patch footprint and maximizes rear cornering stiffness (C_α) and longitudinal traction up to the optimal inflation limit.',
+      'Moves rear pressure toward the assumed target supplied in the setup. This illustrative pressure-efficiency model is not a tyre-specific pressure recommendation.',
     equationReference: 'F_y,r = C_α,r(P_tire) · α_r',
     secondaryTradeoff:
-      'Avoid dropping below minimum safe sidewall pressure (~27 PSI hot) to prevent tire rollover.',
+      'Use the tyre manufacturer’s pressure and loading limits; this model does not establish a minimum safe pressure.',
   },
   {
     id: 'os_aero_rear_wing',
@@ -530,7 +503,6 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 82,
     buildPatch: (setup) => {
       if (setup.aeroFrontBalancePct <= 30) return null;
       const next = Math.max(28, setup.aeroFrontBalancePct - 5);
@@ -560,61 +532,78 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['mid_corner_bump_skittishness', 'poor_traction_exit', 'instability_braking'],
     applicablePhases: ['entry', 'mid', 'exit'],
-    basePriority: 92,
     buildPatch: (setup) => {
-      const nextF = Math.max(4, setup.frontHsBumpClicks - 3);
-      const nextR = Math.max(4, setup.rearHsBumpClicks - 3);
+      const nextF = Math.max(1, setup.frontHsBumpClicks - 3);
+      const nextR = Math.max(1, setup.rearHsBumpClicks - 3);
+      if (nextF === setup.frontHsBumpClicks && nextR === setup.rearHsBumpClicks) return null;
       return {
         directionLabel: `Soften Front/Rear HS Bump (${setup.frontHsBumpClicks}/${setup.rearHsBumpClicks} → ${nextF}/${nextR} clicks)`,
         setupPatch: { frontHsBumpClicks: nextF, rearHsBumpClicks: nextR },
       };
     },
     physicalMechanism:
-      'Reduces high-velocity damper blow-off resistance over curbs and surface imperfections, preventing vertical contact patch load spikes (ΔF_z) that skip the tire across the pavement.',
-    equationReference: 'F_damper(v_shaft) at v_shaft > 100 mm/s',
+      'Investigate a softer manufacturer-specific high-speed compression setting over bumps. This model uses an illustrative surface-efficiency modifier, not a measured damper curve or a contact-force time history.',
+    equationReference: 'Illustrative surface modifier; measured damper force/velocity data required',
     secondaryTradeoff:
       'Slightly increases bottoming risk over extreme compression dips if bump stops are short.',
   },
   {
     id: 'anti_geometry_tune_window',
     parameterKey: 'frontAntiDivePct',
-    title: 'Tune Anti-Dive / Anti-Squat into Optimal 25–35% Race Window',
+    title: 'Explore Anti-Geometry Pitch Support',
     category: 'Pitch Anti-Geometry',
     scope: 'shop',
     applicableSymptoms: ['instability_braking', 'poor_traction_exit', 'mid_corner_bump_skittishness'],
     applicablePhases: ['entry', 'exit'],
-    basePriority: 84,
-    buildPatch: (setup) => {
-      const targetAd = setup.frontAntiDivePct > 40 ? 30 : Math.min(35, setup.frontAntiDivePct + 10);
-      const targetAs = setup.rearAntiSquatPct > 40 ? 32 : Math.min(35, setup.rearAntiSquatPct + 10);
+    buildPatch: (setup, driver) => {
+      const targetAd = driver.cornerPhase === 'entry' ? Math.min(80, setup.frontAntiDivePct + 10) : setup.frontAntiDivePct;
+      const targetAs = driver.cornerPhase === 'exit' ? Math.min(80, setup.rearAntiSquatPct + 10) : setup.rearAntiSquatPct;
+      if (targetAd === setup.frontAntiDivePct && targetAs === setup.rearAntiSquatPct) return null;
       return {
         directionLabel: `Set Anti-Dive ${setup.frontAntiDivePct}%→${targetAd}%, Anti-Squat ${setup.rearAntiSquatPct}%→${targetAs}%`,
         setupPatch: { frontAntiDivePct: targetAd, rearAntiSquatPct: targetAs },
       };
     },
     physicalMechanism:
-      'Anti-geometry does not change total longitudinal weight transfer (ΔW_long), but partitions pitch reaction between rigid links (instantaneous) and coil springs. Keeping %AD and %AS in the 20–40% window controls pitch attitude without locking vertical compliance over braking/traction bumps.',
+      'At fixed acceleration, anti-geometry changes the longitudinal reaction carried by suspension links and springs, rather than total axle load transfer. This candidate explores a 10-point change in the model; it is not a universal optimal geometry setting.',
     equationReference: '%AD = (Z_SVIC / X_SVIC) · (L / h_CG) · BFD × 100',
     secondaryTradeoff:
-      'Exceeding 45% anti-geometry causes suspension binding and wheel hop over uneven braking zones.',
+      'Actual compliance, jacking and wheel-hop behaviour require the vehicle geometry, force paths and transient measurements. No universal threshold is assumed.',
   },
 ];
 
+/**
+ * These are setup candidates evaluated inside the illustrative model, not calibrated
+ * probabilities of fixing a real vehicle. Only balance and a driven-wheel demand
+ * proxy have numerical objectives; response time, braking stability and bump
+ * contact-force variation are not solved by this quasi-static engine.
+ */
 export function solveDiagnosticRecommendations(
   setup: VehicleSetup,
   driver: DriverInputState,
   query: DiagnosticQuery
 ): RankedAdjustmentRecommendation[] {
-  const baselineDriver: DriverInputState = {
-    ...driver,
-    cornerPhase: query.phase,
-    surfaceCondition:
-      query.symptom === 'mid_corner_bump_skittishness'
-        ? 'curbs_and_bumps'
-        : driver.surfaceCondition,
-  };
-
+  // Query phase is explicit. Never silently change the selected track surface.
+  const baselineDriver: DriverInputState = { ...driver, cornerPhase: query.phase };
   const baselineSim = simulateVehicleState(setup, baselineDriver);
+  const isBalanceQuery = query.symptom === 'understeer' || query.symptom === 'oversteer';
+  const isTractionQuery = query.symptom === 'poor_traction_exit';
+  const baselineOutsideModel = hasUnsupportedContactState(baselineSim) ||
+    (isBalanceQuery && baselineSim.warnings.some((warning) => warning.id === 'tire_saturation'));
+  const isCandidateOnly = (!isBalanceQuery && !isTractionQuery) || baselineOutsideModel;
+  const evaluationBasis: NonNullable<RankedAdjustmentRecommendation['evaluationBasis']> =
+    isCandidateOnly ? 'candidate_only' : isBalanceQuery ? 'balance_tendency' : 'traction_reserve_proxy';
+  const objectiveLabel = baselineOutsideModel
+    ? 'Requested state is outside the model’s contact / slip solution; no quantitative ranking'
+    : isBalanceQuery
+    ? 'Illustrative balance toward neutral (points)'
+    : isTractionQuery
+    ? 'Worst driven-wheel demand / capacity (ratio)'
+    : query.symptom === 'slow_turn_in_response'
+    ? 'Turn-in response time is not simulated'
+    : query.symptom === 'instability_braking'
+    ? 'Transient braking stability is not simulated'
+    : 'Bump contact-force variation is not simulated';
 
   const filteredBlueprints = CANDIDATE_BLUEPRINTS.filter((bp) => {
     const matchesSymptom = bp.applicableSymptoms.includes(query.symptom);
@@ -624,43 +613,42 @@ export function solveDiagnosticRecommendations(
   });
 
   const recommendations: RankedAdjustmentRecommendation[] = [];
+  const baselineTractionLoss = isTractionQuery ? drivenWheelDemandRatio(baselineSim) : 0;
 
   for (const bp of filteredBlueprints) {
     const patchSpec = bp.buildPatch(setup, baselineDriver);
     if (!patchSpec) continue;
+    if (!patchChangesValues(setup, patchSpec.setupPatch) &&
+        !patchChangesValues(baselineDriver, patchSpec.driverPatch ?? {})) continue;
 
-    const patchedSetup: VehicleSetup = {
-      ...setup,
-      ...patchSpec.setupPatch,
-    };
+    const patchedSetup: VehicleSetup = { ...setup, ...patchSpec.setupPatch };
     const patchedDriver: DriverInputState = {
       ...baselineDriver,
       ...(patchSpec.driverPatch ?? {}),
     };
-
     const patchedSim = simulateVehicleState(patchedSetup, patchedDriver);
+    const entryDelta = Number((patchedSim.balance.entryScore - baselineSim.balance.entryScore).toFixed(1));
+    const midDelta = Number((patchedSim.balance.midScore - baselineSim.balance.midScore).toFixed(1));
+    const exitDelta = Number((patchedSim.balance.exitScore - baselineSim.balance.exitScore).toFixed(1));
+    const targetDelta = query.phase === 'entry' ? entryDelta : query.phase === 'mid' ? midDelta : exitDelta;
 
-    const entryDelta = Number(
-      (patchedSim.balance.entryScore - baselineSim.balance.entryScore).toFixed(1)
-    );
-    const midDelta = Number(
-      (patchedSim.balance.midScore - baselineSim.balance.midScore).toFixed(1)
-    );
-    const exitDelta = Number(
-      (patchedSim.balance.exitScore - baselineSim.balance.exitScore).toFixed(1)
-    );
-
-    const targetDelta =
-      query.phase === 'entry'
-        ? entryDelta
-        : query.phase === 'mid'
-        ? midDelta
-        : exitDelta;
-
-    const effectivenessScore = Math.min(
-      99,
-      Math.max(60, Math.round(bp.basePriority + Math.min(8, Math.abs(targetDelta) * 0.9)))
-    );
+    let predictedImprovement: number | null = null;
+    if (!isCandidateOnly && isBalanceQuery) {
+      if (hasUnsupportedContactState(patchedSim) || patchedSim.warnings.some((warning) => warning.id === 'tire_saturation')) continue;
+      const currentScore = baselineSim.balance.activeScore;
+      const nextScore = patchedSim.balance.activeScore;
+      // An observed real-world symptom can differ from this assumed model. Do not
+      // fabricate a ranked remedy when its direction is not reproduced here.
+      const symptomIsPresent = query.symptom === 'understeer' ? currentScore > 0 : currentScore < 0;
+      const correctDirection = query.symptom === 'understeer' ? nextScore < currentScore : nextScore > currentScore;
+      const avoidsOppositeImbalance = query.symptom === 'understeer' ? nextScore >= -6 : nextScore <= 6;
+      predictedImprovement = Math.abs(currentScore) - Math.abs(nextScore);
+      if (!symptomIsPresent || !correctDirection || !avoidsOppositeImbalance || predictedImprovement <= 0.05) continue;
+    } else if (!isCandidateOnly && isTractionQuery) {
+      if (hasUnsupportedContactState(patchedSim)) continue;
+      predictedImprovement = baselineTractionLoss - drivenWheelDemandRatio(patchedSim);
+      if (!Number.isFinite(predictedImprovement) || predictedImprovement <= 1e-5) continue;
+    }
 
     recommendations.push({
       id: bp.id,
@@ -671,18 +659,39 @@ export function solveDiagnosticRecommendations(
       directionLabel: patchSpec.directionLabel,
       suggestedSetupPatch: patchSpec.setupPatch,
       suggestedDriverPatch: patchSpec.driverPatch,
-      effectivenessScore,
+      // Kept for API compatibility. It is an ordering score, never confidence.
+      effectivenessScore: predictedImprovement === null ? 0 :
+        Math.min(100, Math.max(0, predictedImprovement * (isTractionQuery ? 100 : 1))),
+      evaluationBasis,
+      objectiveLabel,
+      predictedImprovement,
       balanceDeltaInTargetPhase: targetDelta,
-      physicalMechanism: bp.physicalMechanism,
+      physicalMechanism: isCandidateOnly
+        ? `Candidate mechanism to investigate; ${objectiveLabel.toLowerCase()}. ${bp.physicalMechanism}`
+        : bp.physicalMechanism,
       equationReference: bp.equationReference,
       secondaryTradeoff: bp.secondaryTradeoff,
-      phaseImpact: {
-        entryDelta,
-        midDelta,
-        exitDelta,
-      },
+      phaseImpact: { entryDelta, midDelta, exitDelta },
     });
   }
 
-  return recommendations.sort((a, b) => b.effectivenessScore - a.effectivenessScore);
+  // Candidate-only guidance retains catalogue order and has no numerical rank.
+  return isCandidateOnly ? recommendations : recommendations.sort((a, b) =>
+    (b.predictedImprovement ?? 0) - (a.predictedImprovement ?? 0));
+}
+
+function patchChangesValues<T extends object>(current: T, patch: Partial<T>): boolean {
+  return (Object.keys(patch) as (keyof T)[]).some((key) => !Object.is(current[key], patch[key]));
+}
+
+function drivenWheelDemandRatio(sim: SimulationResult): number {
+  const frontFraction = sim.setup.frontTorqueSplitPct / 100;
+  const drivenWheels = Object.values(sim.wheels).filter((wheel) =>
+    wheel.isFront ? frontFraction > 0 : frontFraction < 1);
+  return Math.max(0, ...drivenWheels.map((wheel) =>
+    Math.hypot(wheel.longitudinalFxN, wheel.lateralFyDemandN) / Math.max(1e-6, wheel.maxTotalForceN)));
+}
+
+function hasUnsupportedContactState(sim: SimulationResult): boolean {
+  return sim.warnings.some((warning) => warning.id === 'wheel_lift' || warning.id === 'roll_equilibrium' || warning.id === 'stationary_force_request');
 }

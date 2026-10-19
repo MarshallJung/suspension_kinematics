@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { ParameterSlider } from '../components/common/ParameterSlider';
+import { AeroControls } from '../components/visualizer/AeroControls';
 import {
   ALIGNMENT_PRESETS,
   AdjustmentScope,
@@ -8,8 +9,8 @@ import {
   DRIVETRAIN_ARCHETYPES,
   RIDE_FREQUENCY_PRESETS,
   RideFrequencyPresetId,
-  newtonsToLbs,
   nmmToLbsPerIn,
+  solveRideFrequencyTarget,
 } from '../engine';
 import { useTuningStore } from '../store/useTuningStore';
 import { ThemePalette } from '../theme/colors';
@@ -23,14 +24,16 @@ type SandboxCategory =
   | 'dampers'
   | 'alignment'
   | 'kinematics_anti'
-  | 'tires_diff_aero';
+  | 'tires_diff_aero'
+  | 'aero_speed';
 
 const CATEGORIES: { id: SandboxCategory; label: string }[] = [
-  { id: 'arb_springs', label: 'ARBs, Springs & Ride Freq' },
-  { id: 'dampers', label: 'Dampers (4-Way)' },
-  { id: 'alignment', label: 'Camber & Toe' },
-  { id: 'kinematics_anti', label: 'Roll Centers & Anti-%' },
-  { id: 'tires_diff_aero', label: 'Tires (Width/PSI), Diff & Aero' },
+  { id: 'arb_springs', label: 'Springs & bars' },
+  { id: 'dampers', label: 'Dampers' },
+  { id: 'alignment', label: 'Alignment' },
+  { id: 'kinematics_anti', label: 'Geometry' },
+  { id: 'tires_diff_aero', label: 'Tires & diff' },
+  { id: 'aero_speed', label: 'Aero & speed' },
 ];
 
 const ALIGNMENT_PRESET_LIST: AlignmentPresetId[] = [
@@ -63,6 +66,8 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
 
   const [activeCategory, setActiveCategory] = useState<SandboxCategory>('arb_springs');
   const base = pinnedBaseline?.setup;
+  const frontFrequencyRange = solveRideFrequencyTarget(currentSim.kinematics.frontNaturalFreqHz, setup, 'front');
+  const rearFrequencyRange = solveRideFrequencyTarget(currentSim.kinematics.rearNaturalFreqHz, setup, 'rear');
   const activeArchetype = DRIVETRAIN_ARCHETYPES[setup.drivetrain];
 
   const isVisibleByScope = (itemScope: AdjustmentScope) =>
@@ -78,34 +83,35 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
         ]}
       >
         <Text style={[styles.sectionHeader, { color: theme.accentPrimary }]}>
-          WHAT-IF PARAMETER SANDBOX • FILTER BY ADJUSTABILITY
+          SETUP CONTROLS
         </Text>
 
         <View style={styles.scopeRow}>
           {(
             [
-              { id: 'all', label: 'All Parameters' },
-              { id: 'trackside', label: '⚡ Trackside Only' },
-              { id: 'shop', label: '🔧 Shop / Alignment Only' },
+              { id: 'all', label: 'All changes' },
+              { id: 'trackside', label: 'Trackside' },
+              { id: 'shop', label: 'Shop' },
             ] as { id: 'all' | AdjustmentScope; label: string }[]
           ).map((sc) => {
             const active = scopeFilter === sc.id;
             return (
-              <Pressable
+              <Pressable accessibilityRole="button"
                 key={sc.id}
                 onPress={() => setScopeFilter(sc.id)}
+                accessibilityState={{ selected: active }}
                 style={[
                   styles.pillBtn,
                   {
-                    backgroundColor: active ? theme.accentSecondary : theme.bgSecondary,
-                    borderColor: active ? theme.accentSecondary : theme.border,
+                    backgroundColor: active ? theme.bgElevated : theme.bgSecondary,
+                    borderColor: active ? theme.border : theme.borderSubtle,
                   },
                 ]}
               >
                 <Text
                   style={[
                     styles.pillText,
-                    { color: active ? '#0B0F17' : theme.textSecondary },
+                    { color: active ? theme.accentPrimary : theme.textSecondary },
                   ]}
                 >
                   {sc.label}
@@ -119,9 +125,10 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
           {CATEGORIES.map((cat) => {
             const active = activeCategory === cat.id;
             return (
-              <Pressable
+              <Pressable accessibilityRole="button"
                 key={cat.id}
                 onPress={() => setActiveCategory(cat.id)}
+                accessibilityState={{ selected: active }}
                 style={[
                   styles.catBtn,
                   {
@@ -133,7 +140,7 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                 <Text
                   style={[
                     styles.catBtnText,
-                    { color: active ? '#0B0F17' : theme.textPrimary },
+                    { color: active ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textPrimary },
                   ]}
                 >
                   {cat.label}
@@ -146,6 +153,8 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
 
       {/* Sliders for Selected Category */}
       <View>
+        {activeCategory === 'aero_speed' ? <AeroControls theme={theme} /> : null}
+
         {activeCategory === 'arb_springs' ? (
           <>
             {isVisibleByScope('trackside') ? (
@@ -159,8 +168,8 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                   step={20}
                   unit="Nm/deg"
                   scope="trackside"
-                  leftHint="Softer Front (More Grip / OS)"
-                  rightHint="Stiffer Front (Higher FRSR / US)"
+                  leftHint="Softer front bar"
+                  rightHint="Stiffer front bar"
                   onChange={(frontArbStiffnessNmPerDeg) =>
                     updateSetup({ frontArbStiffnessNmPerDeg })
                   }
@@ -175,8 +184,8 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                   step={20}
                   unit="Nm/deg"
                   scope="trackside"
-                  leftHint="Softer Rear (More Stability / US)"
-                  rightHint="Stiffer Rear (More Rotation / OS)"
+                  leftHint="Softer rear bar"
+                  rightHint="Stiffer rear bar"
                   onChange={(rearArbStiffnessNmPerDeg) =>
                     updateSetup({ rearArbStiffnessNmPerDeg })
                   }
@@ -194,13 +203,13 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                   ]}
                 >
                   <Text style={[styles.presetBannerTitle, { color: theme.accentPrimary }]}>
-                    TARGET RIDE FREQUENCY PRESETS (f_n = 1/2π · √(K_ride / m_s))
+                    RIDE FREQUENCY TARGETS
                   </Text>
                   <View style={styles.presetRow}>
                     {RIDE_FREQ_PRESET_LIST.map((rfId) => {
                       const rf = RIDE_FREQUENCY_PRESETS[rfId];
                       return (
-                        <Pressable
+                        <Pressable accessibilityRole="button"
                           key={rfId}
                           onPress={() => applyRideFrequencyPreset(rfId)}
                           style={[
@@ -228,14 +237,15 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                       ? Number(pinnedBaseline.sim.kinematics.frontNaturalFreqHz.toFixed(2))
                       : undefined
                   }
-                  min={1.2}
-                  max={3.1}
+                  min={frontFrequencyRange.minAchievableFrequencyHz}
+                  max={frontFrequencyRange.maxAchievableFrequencyHz}
+                  allowOutOfRangeInput
                   step={0.05}
                   decimals={2}
                   unit="Hz"
                   scope="shop"
-                  leftHint="1.20 Hz (Plush Street)"
-                  rightHint="3.10 Hz (Track / Cup Car)"
+                  leftHint={`${frontFrequencyRange.minAchievableFrequencyHz.toFixed(2)} Hz minimum`}
+                  rightHint={`${frontFrequencyRange.maxAchievableFrequencyHz.toFixed(2)} Hz maximum`}
                   onChange={(targetHz) => setTargetRideFrequencyHz('front', targetHz)}
                   theme={theme}
                 />
@@ -247,14 +257,15 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                       ? Number(pinnedBaseline.sim.kinematics.rearNaturalFreqHz.toFixed(2))
                       : undefined
                   }
-                  min={1.2}
-                  max={3.2}
+                  min={rearFrequencyRange.minAchievableFrequencyHz}
+                  max={rearFrequencyRange.maxAchievableFrequencyHz}
+                  allowOutOfRangeInput
                   step={0.05}
                   decimals={2}
                   unit="Hz"
                   scope="shop"
-                  leftHint="1.20 Hz (Plush Street)"
-                  rightHint="3.20 Hz (Track / Cup Car)"
+                  leftHint={`${rearFrequencyRange.minAchievableFrequencyHz.toFixed(2)} Hz minimum`}
+                  rightHint={`${rearFrequencyRange.maxAchievableFrequencyHz.toFixed(2)} Hz maximum`}
                   onChange={(targetHz) => setTargetRideFrequencyHz('rear', targetHz)}
                   theme={theme}
                 />
@@ -265,8 +276,8 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                   )} lbs/in • K_s,f)`}
                   value={setup.frontSpringRateNmm}
                   baselineValue={base?.frontSpringRateNmm}
-                  min={35}
-                  max={220}
+                  min={25}
+                  max={320}
                   step={5}
                   unit="N/mm"
                   scope="shop"
@@ -283,8 +294,8 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                   )} lbs/in • K_s,r)`}
                   value={setup.rearSpringRateNmm}
                   baselineValue={base?.rearSpringRateNmm}
-                  min={40}
-                  max={240}
+                  min={25}
+                  max={320}
                   step={5}
                   unit="N/mm"
                   scope="shop"
@@ -447,13 +458,13 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                 ]}
               >
                 <Text style={[styles.presetBannerTitle, { color: theme.accentPrimary }]}>
-                  ONE-TAP ALIGNMENT PRESETS (ROAD SAFE VS. MAXED OEM VS. TRACK PLATES)
+                  ILLUSTRATIVE ALIGNMENT PRESETS
                 </Text>
                 <View style={styles.presetRow}>
                   {ALIGNMENT_PRESET_LIST.map((presetId) => {
                     const p = ALIGNMENT_PRESETS[presetId];
                     return (
-                      <Pressable
+                      <Pressable accessibilityRole="button"
                         key={presetId}
                         onPress={() => applyAlignmentPreset(presetId)}
                         style={[
@@ -685,7 +696,7 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                 unit="%"
                 scope="shop"
                 leftHint="0% (Max Dive / Max Compliance)"
-                rightHint="75% (Less Dive / Binds Over Bumps >45%)"
+                rightHint="75% (More Front Anti-Dive)"
                 onChange={(frontAntiDivePct) => updateSetup({ frontAntiDivePct })}
                 theme={theme}
               />
@@ -699,7 +710,7 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                 unit="%"
                 scope="shop"
                 leftHint="0% (Max Squat / Max Compliance)"
-                rightHint="75% (Less Squat / Binds Over Bumps >45%)"
+                rightHint="75% (More Rear Anti-Squat)"
                 onChange={(rearAntiSquatPct) => updateSetup({ rearAntiSquatPct })}
                 theme={theme}
               />
@@ -725,7 +736,7 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                     TIRE SECTION WIDTH PRESETS (STAGGERED VS. SQUARE SETUP)
                   </Text>
                   <View style={styles.presetRow}>
-                    <Pressable
+                    <Pressable accessibilityRole="button"
                       onPress={() => applyTireSetupPreset('oem_stagger')}
                       style={[
                         styles.pillBtn,
@@ -736,11 +747,11 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                       ]}
                     >
                       <Text style={[styles.pillText, { color: theme.textPrimary }]}>
-                        OEM Sizing ({activeArchetype.oemFrontTireWidthMm}F /{' '}
+                        Baseline sizing ({activeArchetype.oemFrontTireWidthMm}F /{' '}
                         {activeArchetype.oemRearTireWidthMm}R mm)
                       </Text>
                     </Pressable>
-                    <Pressable
+                    <Pressable accessibilityRole="button"
                       onPress={() => applyTireSetupPreset('square_track')}
                       style={[
                         styles.pillBtn,
@@ -845,24 +856,6 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
                   }
                   theme={theme}
                 />
-                <ParameterSlider
-                  label={`Aero Downforce Balance (Total: ${Math.round(
-                    newtonsToLbs(currentSim.kinematics.totalAeroDownforceN)
-                  )} lbs)`}
-                  value={setup.aeroFrontBalancePct}
-                  baselineValue={base?.aeroFrontBalancePct}
-                  min={25}
-                  max={60}
-                  step={2}
-                  unit="% Front"
-                  scope="trackside"
-                  leftHint="25% Front (More Rear Wing / High-Speed US)"
-                  rightHint="60% Front (More Front Splitter / High-Speed OS)"
-                  onChange={(aeroFrontBalancePct) =>
-                    updateSetup({ aeroFrontBalancePct })
-                  }
-                  theme={theme}
-                />
               </>
             ) : null}
 
@@ -915,8 +908,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   sectionHeader: {
-    fontSize: 10.5,
-    fontWeight: '800',
+    fontSize: 10,
+    fontWeight: '600',
     letterSpacing: 0.5,
     marginBottom: 8,
   },
@@ -934,7 +927,7 @@ const styles = StyleSheet.create({
   },
   pillText: {
     fontSize: 11,
-    fontWeight: '800',
+    fontWeight: '600',
   },
   categoryRow: {
     flexDirection: 'row',
@@ -948,8 +941,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   catBtnText: {
-    fontSize: 11.5,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '600',
   },
   presetBannerCard: {
     padding: 10,
@@ -959,7 +952,7 @@ const styles = StyleSheet.create({
   },
   presetBannerTitle: {
     fontSize: 10,
-    fontWeight: '800',
+    fontWeight: '600',
     letterSpacing: 0.4,
     marginBottom: 6,
   },

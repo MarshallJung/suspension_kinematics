@@ -1,4 +1,5 @@
 export * from './types';
+export * from './aero';
 export * from './archetypes';
 export * from './kinematics';
 export * from './transientDampers';

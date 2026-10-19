@@ -4,14 +4,15 @@ import {
   calculateNaturalFrequencyHz,
   calculateRideRateNmm,
   calculateRollCenterKinematics,
+  calculateTireVerticalRateNmm,
   calculateWheelRateNmm,
   radToDeg,
 } from './kinematics';
 import { DamperAnalysis, evaluateTransientDampers } from './transientDampers';
 import { CornerPhase, DriverInputState, VehicleSetup, WheelId } from './types';
+import { calculateAeroDownforceN } from './aero';
 
 const GRAVITY = 9.81;
-const AIR_DENSITY = 1.225;
 
 export interface LoadTransferSolution {
   // Elastic & Ride Rates
@@ -67,6 +68,35 @@ export interface LoadTransferSolution {
 
   // Damper analysis
   dampers: DamperAnalysis;
+  /** Requested acceleration needs a three-contact/axle-lift solution outside this model. */
+  wheelLiftRequested: boolean;
+  axleLiftRequested: boolean;
+  rollEquilibriumValid: boolean;
+}
+
+/** Phase labels select longitudinal demand; the displayed lateral G remains the actual request. */
+export function phaseAccelerations(driver: DriverInputState, phase: CornerPhase) {
+  const longitudinalG = phase === 'entry'
+    ? -driver.brakingG * Math.max(0, Math.min(1, driver.trailBrakeOverlapPct / 100))
+    : phase === 'exit' ? driver.throttleG : 0;
+  return {
+    longitudinalG: longitudinalG || 0,
+    lateralG: driver.lateralG,
+  };
+}
+
+/** Tyre roll compliance acts in series with the complete spring + ARB suspension. */
+function axleRollRates(wheelRate: number, tireRate: number, trackMm: number, arbNmDeg: number) {
+  const suspension = calculateAxleRollStiffness(wheelRate, trackMm, arbNmDeg);
+  const tireRoll = 0.5 * tireRate * 1000 * Math.pow(trackMm / 1000, 2);
+  const transmission = tireRoll / (tireRoll + suspension.totalAxleRollStiffnessNmRad);
+  return {
+    springRollStiffnessNmRad: suspension.springRollStiffnessNmRad * transmission,
+    arbRollStiffnessNmRad: suspension.arbRollStiffnessNmRad * transmission,
+    totalAxleRollStiffnessNmRad: suspension.totalAxleRollStiffnessNmRad * transmission,
+    suspensionRollFraction: transmission,
+    tireRollStiffnessNmRad: tireRoll,
+  };
 }
 
 export function solveLoadTransfer(
@@ -106,13 +136,15 @@ export function solveLoadTransfer(
   const rearNaturalFreqHz = calculateNaturalFrequencyHz(rearRideRateNmm, rearCornerMassKg);
 
   // 2. Axle Roll Stiffnesses & Front Roll Stiffness Ratio (FRSR)
-  const frontRoll = calculateAxleRollStiffness(
-    frontRideRateNmm,
+  const frontRoll = axleRollRates(
+    frontWheelRateNmm,
+    calculateTireVerticalRateNmm(setup.frontTirePressurePsi, setup.frontTireWidthMm),
     setup.frontTrackMm,
     setup.frontArbStiffnessNmPerDeg
   );
-  const rearRoll = calculateAxleRollStiffness(
-    rearRideRateNmm,
+  const rearRoll = axleRollRates(
+    rearWheelRateNmm,
+    calculateTireVerticalRateNmm(setup.rearTirePressurePsi, setup.rearTireWidthMm),
     setup.rearTrackMm,
     setup.rearArbStiffnessNmPerDeg
   );
@@ -134,29 +166,17 @@ export function solveLoadTransfer(
     phase
   );
 
-  // 5. Phase-Specific Longitudinal (a_x) and Lateral (a_y) Accelerations
-  let netAxG = 0;
-  let effectiveAyG = driver.lateralG;
-
-  if (phase === 'entry') {
-    const trailFactor = 0.45 + 0.55 * (driver.trailBrakeOverlapPct / 100);
-    netAxG = -driver.brakingG * trailFactor;
-    effectiveAyG = driver.lateralG * 0.88;
-  } else if (phase === 'mid') {
-    netAxG = 0;
-    effectiveAyG = driver.lateralG;
-  } else {
-    netAxG = driver.throttleG;
-    effectiveAyG = driver.lateralG * 0.90;
-  }
+  // 5. Prescribed accelerations (not forces solved from a time-domain driver model).
+  const acceleration = phaseAccelerations(driver, phase);
+  const netAxG = acceleration.longitudinalG;
+  const effectiveAyG = acceleration.lateralG;
 
   // 6. Static Weight & Aerodynamic Downforce
   const totalStaticWeightN = setup.massKg * GRAVITY;
   const frontStaticAxleFzN = totalStaticWeightN * setup.frontWeightFraction;
   const rearStaticAxleFzN = totalStaticWeightN * (1 - setup.frontWeightFraction);
 
-  const speedMs = driver.speedKmh / 3.6;
-  const totalAeroDownforceN = 0.5 * AIR_DENSITY * setup.aeroClA * speedMs * speedMs;
+  const totalAeroDownforceN = calculateAeroDownforceN(setup.aeroClA, driver.speedKmh);
   const frontAeroDownforceN = totalAeroDownforceN * (setup.aeroFrontBalancePct / 100);
   const rearAeroDownforceN = totalAeroDownforceN * (1 - setup.aeroFrontBalancePct / 100);
 
@@ -169,87 +189,82 @@ export function solveLoadTransfer(
   const longitudinalLoadTransferN =
     (totalStaticWeightN * hCgStaticM * netAxG) / Math.max(1.5, wheelbaseM);
 
-  // Dynamic axle heave deflection (negative = compression, positive = extension)
-  const antiGeometryFactor =
-    netAxG < 0
-      ? Math.max(0, 1 - setup.frontAntiDivePct / 100)
-      : Math.max(0, 1 - setup.rearAntiSquatPct / 100);
+  // Anti-geometry modifies the longitudinal elastic reaction only. It does not
+  // change total axle load transfer or lateral/aerodynamic deflection.
+  const frontLongitudinalSpringFraction = netAxG < 0
+    ? 1 - Math.max(0, Math.min(1, setup.frontAntiDivePct / 100)) : 1;
+  const rearLongitudinalSpringFraction = netAxG > 0
+    ? 1 - Math.max(0, Math.min(1, setup.rearAntiSquatPct / 100)) : 1;
+  const frontElasticHeaveLoadN = frontAeroDownforceN -
+    longitudinalLoadTransferN * frontLongitudinalSpringFraction;
+  const rearElasticHeaveLoadN = rearAeroDownforceN +
+    longitudinalLoadTransferN * rearLongitudinalSpringFraction;
 
-  // Front axle compresses under braking (-longitudinalLoadTransferN > 0) + aero
-  const dynamicFrontAxleDeltaFzN =
-    frontAeroDownforceN - longitudinalLoadTransferN * antiGeometryFactor;
-  const dynamicRearAxleDeltaFzN =
-    rearAeroDownforceN + longitudinalLoadTransferN * antiGeometryFactor;
-
-  const dynamicFrontHeaveMm =
-    -(0.5 * dynamicFrontAxleDeltaFzN) / Math.max(20, frontWheelRateNmm);
-  const dynamicRearHeaveMm =
-    -(0.5 * dynamicRearAxleDeltaFzN) / Math.max(20, rearWheelRateNmm);
-
-  // Preliminary body roll angle for dynamic roll center migration
-  const prelimHRollM = staticRc.rollMomentArmMm / 1000;
-  const totalRollStiffnessNmRad =
-    frontRoll.totalAxleRollStiffnessNmRad + rearRoll.totalAxleRollStiffnessNmRad;
-  const prelimRollMomentNm = totalStaticWeightN * effectiveAyG * prelimHRollM;
-  const prelimRollDenom = Math.max(
-    8000,
-    (totalRollStiffnessNmRad - totalStaticWeightN * prelimHRollM) * 0.45
-  );
-  const prelimBodyRollDeg = radToDeg(prelimRollMomentNm / prelimRollDenom);
-
-  // 8. Live Dynamic Roll Center Migration & Dynamic Roll Moment Arm (h_roll)
-  const rc = calculateRollCenterKinematics(
-    setup,
-    dynamicFrontHeaveMm,
-    dynamicRearHeaveMm,
-    prelimBodyRollDeg
+  // Compression is positive for wheel travel, negative for chassis ride height.
+  const frontTireRateNmm = calculateTireVerticalRateNmm(setup.frontTirePressurePsi, setup.frontTireWidthMm);
+  const rearTireRateNmm = calculateTireVerticalRateNmm(setup.rearTirePressurePsi, setup.rearTireWidthMm);
+  const frontBodyCompressionMm = frontElasticHeaveLoadN / (2 * frontWheelRateNmm) +
+    (frontAeroDownforceN - longitudinalLoadTransferN) / (2 * frontTireRateNmm);
+  const rearBodyCompressionMm = rearElasticHeaveLoadN / (2 * rearWheelRateNmm) +
+    (rearAeroDownforceN + longitudinalLoadTransferN) / (2 * rearTireRateNmm);
+  const dynamicFrontHeaveMm = -frontBodyCompressionMm;
+  const dynamicRearHeaveMm = -rearBodyCompressionMm;
+  const bodyPitchDeg = radToDeg(
+    (frontBodyCompressionMm - rearBodyCompressionMm) / -setup.wheelbaseMm
   );
 
-  const hRollM = rc.rollMomentArmMm / 1000;
-  const rollMomentNm = totalStaticWeightN * effectiveAyG * hRollM;
-  const effectiveRollDenominator = Math.max(
-    8000,
-    (totalRollStiffnessNmRad - totalStaticWeightN * hRollM) * 0.45
-  );
-  const bodyRollRad = rollMomentNm / effectiveRollDenominator;
+  // A single equivalent rigid body, small-angle roll equilibrium:
+  // (Kphi - W*hroll)*phi = W*AyG*hCG - sum(transmission * Fy_axle*zRC).
+  // The transmission term accounts for tyre roll deflection from direct
+  // geometric load transfer. As tyre stiffness -> infinity this reduces to
+  // the familiar (Kphi - W*hroll)*phi = W*AyG*hroll.
+  // Iterate because the illustrative roll-centre profile changes with roll.
+  const totalRollStiffnessNmRad = frontRoll.totalAxleRollStiffnessNmRad +
+    rearRoll.totalAxleRollStiffnessNmRad;
+  let bodyRollRad = 0;
+  let rc = calculateRollCenterKinematics(setup, dynamicFrontHeaveMm, dynamicRearHeaveMm, 0);
+  let rollEquilibriumValid = false;
+  for (let i = 0; i < 50; i++) {
+    rc = calculateRollCenterKinematics(setup, dynamicFrontHeaveMm,
+      dynamicRearHeaveMm, radToDeg(bodyRollRad));
+    const gravityMomentGradient = totalStaticWeightN * rc.rollMomentArmMm / 1000;
+    const denominator = totalRollStiffnessNmRad - gravityMomentGradient;
+    if (denominator <= 0) break;
+    const transmittedGeometricMomentNm = totalStaticWeightN * effectiveAyG / 1000 *
+      (setup.frontWeightFraction * frontRoll.suspensionRollFraction * rc.effectiveFrontRollCenterMm +
+        (1 - setup.frontWeightFraction) * rearRoll.suspensionRollFraction * rc.effectiveRearRollCenterMm);
+    const targetRollRad = (totalStaticWeightN * effectiveAyG * rc.effectiveCgHeightMm / 1000 -
+      transmittedGeometricMomentNm) / denominator;
+    if (!Number.isFinite(targetRollRad) || Math.abs(targetRollRad) > 0.25) break;
+    if (Math.abs(targetRollRad - bodyRollRad) < 1e-10) {
+      bodyRollRad = targetRollRad;
+      rollEquilibriumValid = true;
+      break;
+    }
+    bodyRollRad = 0.5 * (bodyRollRad + targetRollRad);
+  }
   const bodyRollDeg = radToDeg(bodyRollRad);
+  rc = calculateRollCenterKinematics(setup, dynamicFrontHeaveMm, dynamicRearHeaveMm, bodyRollDeg);
 
-  // Elastic + Geometric Lateral Load Transfer per axle
-  const effectiveElasticFrontFraction = Math.max(
-    0.15,
-    Math.min(0.85, frontRollStiffnessRatio + dampers.transientFrontLoadTransferShift)
-  );
-
-  const zRcFrontM = rc.effectiveFrontRollCenterMm / 1000;
-  const zRcRearM = rc.effectiveRearRollCenterMm / 1000;
-  const bOverL = setup.frontWeightFraction;
-  const aOverL = 1 - setup.frontWeightFraction;
-
-  const rawFrontLatTransferN =
-    ((totalStaticWeightN * effectiveAyG) / frontTrackM) *
-    (effectiveElasticFrontFraction * hRollM + bOverL * zRcFrontM);
-
-  const rawRearLatTransferN =
-    ((totalStaticWeightN * effectiveAyG) / rearTrackM) *
-    ((1 - effectiveElasticFrontFraction) * hRollM + aOverL * zRcRearM);
-
-  const frontLateralLoadTransferN = Math.max(0, rawFrontLatTransferN);
-  const rearLateralLoadTransferN = Math.max(0, rawRearLatTransferN);
-
+  // Damper shifts are explicitly illustrative phase modifiers. They repartition
+  // the elastic reaction without changing the total roll reaction.
+  const effectiveElasticFrontFraction = Math.max(0, Math.min(1,
+    frontRollStiffnessRatio + dampers.transientFrontLoadTransferShift));
+  const elasticRollMomentNm = totalRollStiffnessNmRad * bodyRollRad;
+  const frontGeometricRollMomentNm = totalStaticWeightN * setup.frontWeightFraction *
+    effectiveAyG * rc.effectiveFrontRollCenterMm / 1000;
+  const rearGeometricRollMomentNm = totalStaticWeightN * (1 - setup.frontWeightFraction) *
+    effectiveAyG * rc.effectiveRearRollCenterMm / 1000;
+  const frontGroundRollMomentNm = elasticRollMomentNm * effectiveElasticFrontFraction +
+    frontRoll.suspensionRollFraction * frontGeometricRollMomentNm;
+  const rearGroundRollMomentNm = elasticRollMomentNm * (1 - effectiveElasticFrontFraction) +
+    rearRoll.suspensionRollFraction * rearGeometricRollMomentNm;
+  const frontLateralLoadTransferN = frontGroundRollMomentNm / frontTrackM;
+  const rearLateralLoadTransferN = rearGroundRollMomentNm / rearTrackM;
   const totalLatTransferN = frontLateralLoadTransferN + rearLateralLoadTransferN;
-  const totalLateralLoadTransferDistributionFront =
-    totalLatTransferN > 1 ? frontLateralLoadTransferN / totalLatTransferN : frontRollStiffnessRatio;
-
-  const diagonalLoadTransferN = Math.sqrt(
-    longitudinalLoadTransferN * longitudinalLoadTransferN +
-      totalLatTransferN * totalLatTransferN
-  );
-
-  // 9. Chassis Pitch Angle (theta)
-  const pitchStiffnessNmRad =
-    0.5 * (frontRideRateNmm * 1000 + rearRideRateNmm * 1000) * (wheelbaseM * wheelbaseM * 0.25);
-  const pitchMomentNm = totalStaticWeightN * netAxG * hCgStaticM * antiGeometryFactor;
-  const bodyPitchDeg = radToDeg(pitchMomentNm / Math.max(15000, pitchStiffnessNmRad));
+  const totalLateralLoadTransferDistributionFront = Math.abs(totalLatTransferN) > 1e-9
+    ? frontLateralLoadTransferN / totalLatTransferN : frontRollStiffnessRatio;
+  const diagonalLoadTransferN = Math.hypot(longitudinalLoadTransferN, totalLatTransferN);
 
   // 10. 4-Corner Static and Dynamic Vertical Loads
   const frontAxleDynamicFzN =
@@ -257,8 +272,20 @@ export function solveLoadTransfer(
   const rearAxleDynamicFzN =
     rearStaticAxleFzN + rearAeroDownforceN + longitudinalLoadTransferN;
 
-  const clampedFrontLatN = Math.min(frontAxleDynamicFzN * 0.495, frontLateralLoadTransferN);
-  const clampedRearLatN = Math.min(rearAxleDynamicFzN * 0.495, rearLateralLoadTransferN);
+  const axleLiftRequested = frontAxleDynamicFzN < 0 || rearAxleDynamicFzN < 0;
+  // At lift, display zero contact load and mark the request outside the model.
+  // This is NOT a solved three-contact vehicle state. Renormalizing axle loads
+  // in the rarer axle-lift case preserves total vertical load for the display.
+  const totalNormalLoadN = totalStaticWeightN + totalAeroDownforceN;
+  const displayFrontAxleFzN = Math.max(0, Math.min(totalNormalLoadN, frontAxleDynamicFzN));
+  const displayRearAxleFzN = totalNormalLoadN - displayFrontAxleFzN;
+  const wheelLiftRequested = axleLiftRequested ||
+    Math.abs(frontLateralLoadTransferN) >= 0.5 * displayFrontAxleFzN ||
+    Math.abs(rearLateralLoadTransferN) >= 0.5 * displayRearAxleFzN;
+  const clampedFrontLatN = Math.max(-0.5 * displayFrontAxleFzN,
+    Math.min(0.5 * displayFrontAxleFzN, frontLateralLoadTransferN));
+  const clampedRearLatN = Math.max(-0.5 * displayRearAxleFzN,
+    Math.min(0.5 * displayRearAxleFzN, rearLateralLoadTransferN));
 
   const isLeftTurn = driver.turnDirection === 'left';
 
@@ -269,10 +296,10 @@ export function solveLoadTransfer(
     RR: 0.5 * rearStaticAxleFzN,
   };
 
-  const frontOutsideFzN = 0.5 * frontAxleDynamicFzN + clampedFrontLatN;
-  const frontInsideFzN = 0.5 * frontAxleDynamicFzN - clampedFrontLatN;
-  const rearOutsideFzN = 0.5 * rearAxleDynamicFzN + clampedRearLatN;
-  const rearInsideFzN = 0.5 * rearAxleDynamicFzN - clampedRearLatN;
+  const frontOutsideFzN = 0.5 * displayFrontAxleFzN + clampedFrontLatN;
+  const frontInsideFzN = 0.5 * displayFrontAxleFzN - clampedFrontLatN;
+  const rearOutsideFzN = 0.5 * displayRearAxleFzN + clampedRearLatN;
+  const rearInsideFzN = 0.5 * displayRearAxleFzN - clampedRearLatN;
 
   const wheelDynamicFzN: Record<WheelId, number> = {
     FL: isLeftTurn ? frontInsideFzN : frontOutsideFzN,
@@ -281,30 +308,26 @@ export function solveLoadTransfer(
     RR: isLeftTurn ? rearOutsideFzN : rearInsideFzN,
   };
 
-  // 11. Vertical Suspension Deflections (mm)
-  const longSpringFraction = antiGeometryFactor;
+  // 11. Spring travel follows chassis heave plus the suspension share of roll.
+  // Geometric load transfer bypasses the springs. ARB reactions must not be
+  // mistaken for main-spring force, and tyre deflection is not suspension travel.
+  const frontHeaveTravelMm = frontElasticHeaveLoadN / (2 * frontWheelRateNmm);
+  const rearHeaveTravelMm = rearElasticHeaveLoadN / (2 * rearWheelRateNmm);
+  const frontRollTravelMm = (bodyRollRad -
+    frontGroundRollMomentNm / frontRoll.tireRollStiffnessNmRad) * setup.frontTrackMm / 2;
+  const rearRollTravelMm = (bodyRollRad -
+    rearGroundRollMomentNm / rearRoll.tireRollStiffnessNmRad) * setup.rearTrackMm / 2;
+  const outsideSign = isLeftTurn ? 1 : -1;
   const wheelDeflectionMm: Record<WheelId, number> = {
-    FL:
-      ((wheelDynamicFzN.FL - wheelStaticFzN.FL) *
-        (0.65 + 0.35 * longSpringFraction)) /
-      Math.max(15, frontWheelRateNmm),
-    FR:
-      ((wheelDynamicFzN.FR - wheelStaticFzN.FR) *
-        (0.65 + 0.35 * longSpringFraction)) /
-      Math.max(15, frontWheelRateNmm),
-    RL:
-      ((wheelDynamicFzN.RL - wheelStaticFzN.RL) *
-        (0.65 + 0.35 * longSpringFraction)) /
-      Math.max(15, rearWheelRateNmm),
-    RR:
-      ((wheelDynamicFzN.RR - wheelStaticFzN.RR) *
-        (0.65 + 0.35 * longSpringFraction)) /
-      Math.max(15, rearWheelRateNmm),
+    FL: frontHeaveTravelMm - outsideSign * frontRollTravelMm,
+    FR: frontHeaveTravelMm + outsideSign * frontRollTravelMm,
+    RL: rearHeaveTravelMm - outsideSign * rearRollTravelMm,
+    RR: rearHeaveTravelMm + outsideSign * rearRollTravelMm,
   };
 
   // 12. Jacking Forces
-  const frontLateralForceApproxN = frontAxleDynamicFzN * effectiveAyG;
-  const rearLateralForceApproxN = rearAxleDynamicFzN * effectiveAyG;
+  const frontLateralForceApproxN = frontStaticAxleFzN * effectiveAyG;
+  const rearLateralForceApproxN = rearStaticAxleFzN * effectiveAyG;
   const frontJackingForceN =
     frontLateralForceApproxN * (rc.effectiveFrontRollCenterMm / (0.5 * setup.frontTrackMm));
   const rearJackingForceN =
@@ -351,5 +374,8 @@ export function solveLoadTransfer(
     wheelDynamicFzN,
     wheelDeflectionMm,
     dampers,
+    wheelLiftRequested,
+    axleLiftRequested,
+    rollEquilibriumValid,
   };
 }

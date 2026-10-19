@@ -16,6 +16,16 @@ export type TireSetupPresetId = 'oem_stagger' | 'square_track' | 'wide_rear_stag
 
 export type RideFrequencyPresetId = 'oem_street' | 'clubsport_track' | 'full_race';
 
+export interface RideFrequencyTargetSolution {
+  requestedFrequencyHz: number;
+  achievedFrequencyHz: number;
+  springRateNmm: number;
+  minAchievableFrequencyHz: number;
+  maxAchievableFrequencyHz: number;
+  status: 'achieved' | 'limited';
+  limitReason: 'minimum_spring_rate' | 'maximum_spring_rate' | 'tire_stiffness_limit' | null;
+}
+
 export interface VehicleSetup {
   // Archetype identifiers
   drivetrain: DrivetrainArchetype;
@@ -33,10 +43,10 @@ export interface VehicleSetup {
   // 2. Elastic Properties (Springs & Anti-Roll Bars)
   frontSpringRateNmm: number; // K_s,f (N/mm)
   rearSpringRateNmm: number; // K_s,r (N/mm)
-  frontMotionRatio: number; // MR_f = dx_damper / dx_wheel
-  rearMotionRatio: number; // MR_r
-  frontSpringInclinationDeg: number; // theta_spring,f (deg, 90 = perpendicular)
-  rearSpringInclinationDeg: number; // theta_spring,r (deg)
+  frontMotionRatio: number; // MR_f = actual axial spring travel / wheel travel (includes inclination)
+  rearMotionRatio: number; // MR_r = actual axial spring travel / wheel travel
+  frontSpringInclinationDeg: number; // Legacy geometry metadata; projection already included in measured MR
+  rearSpringInclinationDeg: number; // Legacy geometry metadata; not an additional rate multiplier
   frontArbStiffnessNmPerDeg: number; // Added axle roll stiffness from front ARB (Nm/deg)
   rearArbStiffnessNmPerDeg: number; // Added axle roll stiffness from rear ARB (Nm/deg)
 
@@ -84,7 +94,7 @@ export interface VehicleSetup {
 export interface DriverInputState {
   cornerPhase: CornerPhase;
   turnDirection: 'left' | 'right';
-  speedKmh: number; // 50 to 240 km/h
+  speedKmh: number; // Non-negative road speed; UI accepts 0–200 mph (0–321.87 km/h)
   lateralG: number; // 0.3 to 1.5 g
   brakingG: number; // 0.0 to 1.2 g (active in entry / trail-braking)
   throttleG: number; // 0.0 to 0.8 g (active in exit)
@@ -231,7 +241,10 @@ export interface RankedAdjustmentRecommendation {
   directionLabel: string;
   suggestedSetupPatch: Partial<VehicleSetup>;
   suggestedDriverPatch?: Partial<DriverInputState>;
-  effectivenessScore: number; // 0 to 100
+  effectivenessScore: number; // Internal ordering score, not a probability; 0 = unranked candidate
+  evaluationBasis?: 'balance_tendency' | 'traction_reserve_proxy' | 'candidate_only';
+  objectiveLabel?: string;
+  predictedImprovement?: number | null;
   balanceDeltaInTargetPhase: number;
   physicalMechanism: string;
   equationReference: string;

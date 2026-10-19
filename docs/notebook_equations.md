@@ -1,120 +1,219 @@
-# Canonical Mathematical & Kinematic Specification
+# Implemented equations, assumptions and limits
 
-This document synthesizes the deterministic equations and rules from **`Comprehensive Engineering Framework for Race Car Suspension Kinematics, Dynamics, and Computational Modeling.pdf`** (Milliken & Milliken *RCVD*, Dixon, Gillespie, Carroll Smith, and Pacejka) together with the transient damper, drivetrain/differential, aerodynamic, and driver-input extensions required for a complete trackside tuning model.
+This notebook describes the current TypeScript engine. It distinguishes algebraic constraints from illustrative project coefficients. It does not certify an individual vehicle or claim that every formula/constant was taken from a cited textbook.
 
----
+## 1. Coordinates and units
 
-## 1. Coordinate Systems & Spatial Kinematics (SAE J670 / Inverted Z)
+For the standalone spatial linkage helper, use a right-handed Cartesian frame: **X forward, Y left, Z up**. Input point coordinates must use one common length unit. The helper orients positive arm rotation to give an initially upward radial tangent when defined. It is not a complete upright/steering/tie-rod model.
 
-- **Chassis Reference Frame ($C_{xyz}$):**
-  - $+X$: Horizontally forward along longitudinal centerline
-  - $+Y$: Laterally to the right side of the vehicle
-  - $+Z$: Vertically upward (computational kinematic solver convention)
-- **Upright Local Frame ($U_{xyz}$):**
-  - Governed by spatial orientation angles: **Camber ($\gamma$)**, **Caster ($\nu$)**, **Kingpin Inclination / SAI ($\theta_{\text{KPI}}$)**, and **Toe ($\delta_T$)** + **Steer Angle ($\delta$)**.
-- **Homogeneous Transformation ($SE(3)$) & Parametric Arc-Sphere Solver:**
-  - Outboard ball joints follow circular arcs around inboard pivot axes $\hat{\mathbf{a}} = \frac{\mathbf{p}_{in2} - \mathbf{p}_{in1}}{\|\mathbf{p}_{in2} - \mathbf{p}_{in1}\|}$:
-    $$\mathbf{p}(\theta) = \mathbf{c} + R(\mathbf{u}\cos\theta + \mathbf{v}\sin\theta)$$
-  - Upright kingpin length constraint $\|\mathbf{p}_{ubj}(\theta_u) - \mathbf{p}_{lbj}(\theta_l)\|^2 - L_{kp}^2 = 0$ expands to:
-    $$A\cos\theta_u + B\sin\theta_u + C = 0$$
-  - Solved analytically via the **Weierstrass substitution** $t = \tan(\theta_u / 2)$:
-    $$(C - A)t^2 + 2Bt + (C + A) = 0 \implies t = \frac{-B \pm \sqrt{B^2 - (C^2 - A^2)}}{C - A}, \quad \theta_u = 2\arctan(t)$$
+The live model uses named FL/FR/RL/RR corners. `lateralG` is the nonnegative cornering-demand magnitude; `turnDirection` determines inside/outside. In a left turn, FR/RR are outside. The planar force-allocation calculation uses right-positive lateral force/yaw signs; these planar signs are separate from the standalone helper's 3D coordinate convention. Positive `netAxG` is acceleration; negative is braking. Positive suspension travel is bump/compression. Positive pitch is nose-up. The screen uses pixel X right and Y down; screen vectors are display mappings, not the 3D frame. No SAE-coordinate-compliance claim is made.
 
----
+The engine stores N, N/mm, mm, kg, degrees, km/h and G multiples, with explicit conversions to N/m, m, radians and m/s where required. Display conversions include lbf, lb/in and mph. An acceleration named `AxG` or `AyG` is dimensionless; physical acceleration is `g × AG`, with `g = 9.81 m/s²`.
 
-## 2. Fundamental Kinematic Parameters & Steering Geometry
+## 2. Mass, driver requests and normal loads
 
-### 2.1 Dynamic Camber ($\gamma_{\text{dyn}}$)
-The instantaneous camber angle of a wheel relative to the road surface combines static camber ($\gamma_0$), bump camber gain ($d\gamma/dz$), chassis roll camber coefficient ($d\gamma/d\phi$), and steering-induced camber from caster ($\nu$) and KPI ($\theta_{\text{KPI}}$):
+Let `m` be total mass, `W = mg`, `wf` front static weight fraction, `L` wheelbase and `h` the ride-height-adjusted CG height.
 
-$$\gamma_{\text{dyn,out}} = \gamma_0 + \left(\frac{d\gamma}{dz}\right)\Delta z_{\text{bump}} + \left(\frac{d\gamma}{d\phi}\right)\phi - \nu\sin|\delta_o| + \theta_{\text{KPI}}(1 - \cos|\delta_o|)$$
+```text
+Wf = wf W                          Wr = (1 − wf) W
+Entry: AxG = −brakingG × overlap/100
+Apex:  AxG = 0
+Exit:  AxG = throttleG
+AyG = requested lateralG
+D = ½ ρ (CL A) v²                  ρ = 1.225 kg/m³
+Df = aeroFrontFraction × D         Dr = D − Df
+ΔFz,long = W × AxG × h/L
+Fz,f = Wf + Df − ΔFz,long
+Fz,r = Wr + Dr + ΔFz,long
+```
 
-- **Suspension Archetype Characteristics:**
-  - **Double Wishbone:** Shorter, inward-inclined upper control arm yields strong negative camber gain in bump ($d\gamma/dz < 0$, compensating for body roll $\phi$).
-  - **MacPherson Strut:** Limited camber recovery in bump; sensitive to ride-height over-lowering (when the lower control arm passes horizontal, roll center drops rapidly underground and camber recovery degrades).
-  - **Multi-Link (5-Link):** Tunable virtual instant centers providing controlled camber recovery and toe compliance control (e.g., Porsche Weissach / 5-link rear).
+Braking at zero overlap has zero longitudinal demand in the corner-entry scenario. Phase labels do not integrate elapsed time or driver controls. Aero balance sets the axle split of downforce. There is no lateral aerodynamic force or drag/powertrain performance model.
 
-### 2.2 Front View Swing Arm ($L_{\text{FVSA}}$) & Roll Center Height ($z_{\text{rc}}$)
-- Extending the upper and lower control arm projections in front view defines the Instant Center (IC) at horizontal distance $L_{\text{FVSA}}$ from the contact patch.
-- The line from the tire contact patch center through the IC intersects the vehicle centerline at the **Kinematic Roll Center Height ($z_{\text{rc},f}, z_{\text{rc},r}$)**:
-  $$z_{\text{rc}} = z_{\text{IC}} \cdot \frac{t / 2}{L_{\text{FVSA}}}$$
-- **Roll Moment Arm ($h_{\text{roll}}$):**
-  $$z_{\text{rc,CG}} = \frac{b \cdot z_{\text{rc},f} + a \cdot z_{\text{rc},r}}{L}, \quad h_{\text{roll}} = h_{\text{CG}} - z_{\text{rc,CG}}$$
-- **Tradeoff (Jacking Forces):** Raising $z_{\text{rc}}$ closer to $h_{\text{CG}}$ reduces the roll moment arm $h_{\text{roll}}$ and body roll $\phi$, but steep control arm angles generate vertical **jacking forces** ($F_{z,\text{jack}} = F_y \cdot \frac{z_{\text{rc}}}{t/2}$) that lift the sprung mass during cornering.
+Anti-geometry does not change these total axle-load equations at fixed inputs. The simplified elastic fractions are applied only to front braking (`1 − AD/100`) or rear acceleration (`1 − AS/100`); the other axle's applicable fraction is one. The model does not include every front/rear anti-lift or anti-pitch force path.
 
-### 2.3 Steering Geometry & Ackermann
-- **Pure Geometric Ackermann:**
-  $$\cot\delta_o - \cot\delta_i = \frac{w}{L}$$
-- High-grip track tires exhibit non-linear slip-angle load sensitivity, where the heavily loaded outer tire requires a larger slip angle $\alpha_{\text{peak}}$ than the lightly loaded inner tire, often favoring reduced/parallel Ackermann in high-speed corners.
+## 3. Spring, tyre, ride rate and frequency
 
----
+The stored motion ratio is **actual axial spring travel / vertical wheel travel**, so its installation projection is already included:
 
-## 3. Longitudinal Anti-Geometries: Anti-Dive & Anti-Squat
+```text
+Kw = Ks MR²
+Kride = Kw Kt / (Kw + Kt)
+ms,corner = 0.5 × m × axleWeightFraction × 0.88
+fn = √(1000 Kride / ms,corner) / (2π)
+```
 
-- **Front Anti-Dive Percentage ($\%AD$):**
-  $$\%AD = \left(\frac{Z_{\text{SVIC},f}}{X_{\text{SVIC},f}}\right) \cdot \left(\frac{L}{h_{\text{CG}}}\right) \cdot \text{BFD} \times 100$$
-  where $\text{BFD}$ is the front brake force distribution fraction.
-- **Rear Anti-Squat Percentage ($\%AS$):**
-  $$\%AS = \left(\frac{Z_{\text{SVIC},r}}{X_{\text{SVIC},r}}\right) \cdot \left(\frac{L}{h_{\text{CG}}}\right) \cdot (1 - \text{DriveSplit}) \times 100$$
-  where $\text{DriveSplit}$ is the front torque split ($0.0$ for `RR`/`FR`/`MR`, $1.0$ for `FF`, $0.30\text{--}0.50$ for `AWD`).
-- **Fundamental Governing Rule:**
-  - Anti-geometry **does NOT alter total steady-state longitudinal weight transfer** $\Delta W_{\text{long}}$.
-  - It partitions longitudinal force reaction between **rigid links** (instantaneous, zero phase lag, reduces dynamic pitch angle $\theta$) and **coil springs** (delayed by suspension displacement).
-  - **Optimal Track Window ($20\%\text{--}40\%$):** Maintains aerodynamic platform stability without binding the suspension or causing wheel hop over braking/traction bumps ($>45\%$ increases vertical harshness and contact patch load variation on bumpy surfaces).
+The retained spring-inclination property is legacy geometry metadata; the engine does not multiply measured MR by a second sine factor. The rate is a local tangent approximation with constant MR and no preload/geometric-rate derivative. The 0.88 sprung fraction is assumed, not measured. The frequency is a low-frequency single-mode approximation, not the eigenvalues of a two-mass quarter-car system.
 
----
+The vertical tyre-rate illustration is:
 
-## 4. Elastic Rates, Roll Stiffness & Load Transfer Distribution
+```text
+P = clamp(pressurePSI, 18, 50)
+Kt [N/mm] = 240 × (0.55 + 0.45 P/32) × (0.82 + 0.18 widthMM/255)
+```
 
-### 4.1 Motion Ratio ($MR$), Wheel Rate ($K_w$), and Ride Rate ($K_{\text{ride}}$)
-$$MR = \frac{\Delta x_{\text{damper}}}{\Delta x_{\text{wheel}}}, \quad K_w = K_s \cdot MR^2 \cdot \sin^2(\theta_{\text{spring}})$$
-Including tire vertical stiffness $K_t(P_{\text{tire}})$ in series with wheel rate:
-$$K_{\text{ride}} = \frac{K_w \cdot K_t}{K_w + K_t}$$
+This pressure/width relationship is a project assumption. It requires tyre-specific load/deflection data for quantitative use.
 
-### 4.2 Anti-Roll Bar (ARB) & Total Axle Roll Stiffness ($K_{\phi}$)
-For a tubular steel anti-roll bar ($G = 79.3\text{ GPa}$):
-$$K_{\text{ARB}} = \frac{G \cdot \pi (D_o^4 - D_i^4)}{32 \cdot L_{\text{tube}}}, \quad K_{\phi,\text{ARB}} = \left(\frac{K_{\text{ARB}}}{a_{\text{arm}}^2}\right) \cdot MR_{\text{ARB}}^2 \cdot t^2$$
-Single-axle and total vehicle roll stiffness:
-$$K_{\phi,f} = \frac{1}{2} K_{\text{ride},f} t_f^2 + K_{\phi,\text{ARB},f}, \quad K_{\phi,r} = \frac{1}{2} K_{\text{ride},r} t_r^2 + K_{\phi,\text{ARB},r}, \quad K_{\phi,\text{total}} = K_{\phi,f} + K_{\phi,r}$$
+### Target inversion and limits
 
-### 4.3 Front Roll Stiffness Ratio ($FRSR$) & Lateral Load Transfer Distribution ($LLTD$)
-$$FRSR = \frac{K_{\phi,f}}{K_{\phi,f} + K_{\phi,r}}$$
-Combining elastic roll stiffness distribution and geometric roll center load transfer:
-$$\Delta F_{z,\text{lat},f} = \frac{m \cdot a_y}{t_f} \left( FRSR \cdot h_{\text{roll}} + \frac{b}{L} z_{\text{rc},f} \right), \quad \Delta F_{z,\text{lat},r} = \frac{m \cdot a_y}{t_r} \left( (1 - FRSR) \cdot h_{\text{roll}} + \frac{a}{L} z_{\text{rc},r} \right)$$
-$$TLLTD_f = \frac{\Delta F_{z,\text{lat},f}}{\Delta F_{z,\text{lat},f} + \Delta F_{z,\text{lat},r}}$$
+```text
+Kride,target = (2π ftarget)² ms,corner / 1000
+Kw,target = Kride,target Kt / (Kt − Kride,target)
+Ks,target = Kw,target / MR²
+```
 
-- **Fundamental Balance Rule:**
-  - **Understeer Bias ($TLLTD_f > W_f / W$):** Front axle carries a disproportionately high share of lateral load transfer, overloading the outer front tire via tire load sensitivity, increasing front slip angle $\alpha_f > \alpha_r$.
-  - **Oversteer Bias ($TLLTD_f < W_f / W$):** Lateral load transfer shifts rearward, overloading the outer rear tire, increasing rear slip angle $\alpha_r > \alpha_f$.
+A finite positive solution requires `Kride,target < Kt`. `solveRideFrequencyTarget` returns attained frequency and the bounds resulting from the allowed **25–320 N/mm** springs. It reports minimum-spring, maximum-spring or tyre-stiffness limitation. It rejects invalid inputs. Feasible targets are solved without silently clipping the target or adding an installation-angle factor.
 
-### 4.4 Longitudinal & Diagonal Load Transfer
-$$\Delta F_{z,\text{long}} = \frac{m \cdot a_x \cdot h_{\text{CG}}}{L}, \quad \Delta W_{\text{diag}} = \sqrt{\Delta W_{\text{long}}^2 + \Delta W_{\text{lat}}^2}$$
+## 4. Roll stiffness and roll equilibrium
 
----
+Convert N/mm rates to N/m and Nm/degree ARB rates to Nm/radian. Use metres for tracks, roll-centre/CG heights and lever arms in this section’s moment equations; the implementation explicitly converts its stored mm values. For axle track `t`:
 
-## 5. Tire Contact Patch, Load Sensitivity & Combined Slip (Pacejka / Friction Ellipse)
+```text
+Kφ,spring = ½ (1000 Kw) t²
+Kφ,suspension = Kφ,spring + Kφ,ARB
+Kφ,tyre = ½ (1000 Kt) t²
+Aaxle = Kφ,tyre / (Kφ,suspension + Kφ,tyre)
+Kφ,axle = Aaxle Kφ,suspension
+Kφ,total = Kφ,front + Kφ,rear
+FRSR = Kφ,front / Kφ,total
+```
 
-1. **Tire Load Sensitivity ($\mu(F_z)$):**
-   $$\mu(F_z) = \mu_0 \cdot \left(\frac{F_z}{F_{z,\text{nom}}}\right)^{-k_{\text{sens}}}$$
-   Because $k_{\text{sens}} > 0$, doubling vertical load $F_z$ yields less than double the lateral force $F_y$. Thus, higher axle load transfer $\Delta F_{z,\text{lat}}$ always reduces total axle cornering capacity:
-   $$F_{y,\text{axle}}(F_{z,L}, F_{z,R}) = \mu(F_{z,L}) F_{z,L} + \mu(F_{z,R}) F_{z,R}$$
-2. **Camber Thrust ($C_\gamma$) & Tire Pressure Efficiency ($\eta_P$):**
-   - Effective grip scales with how close dynamic camber $\gamma_{\text{dyn}}$ is to the tire's optimal negative camber window ($\gamma_{\text{opt}} \approx -2.5^\circ\text{ to }-3.2^\circ$) and how close hot tire pressure $P_{\text{tire}}$ is to $P_{\text{opt}}$.
-3. **Combined Longitudinal + Lateral Friction Ellipse:**
-   $$F_{y,\text{avail},i} = F_{y,\max,i} \cdot \sqrt{\max\left(0, 1 - \left(\frac{F_{x,i}}{F_{x,\max,i}}\right)^2\right)}$$
+Tyre roll compliance acts **in series with the complete spring-plus-ARB suspension**. Adding an ARB after putting only the springs in series with the tyre would bypass part of that tyre compliance. Reported front/rear spring and ARB roll contributions are apportioned through the same series transmission factor.
 
----
+The live geometry profile provides front/rear roll-centre heights. The CG lies `(1 − wf)L` behind the front axle, hence:
 
-## 6. Transient Damper Mechanics, Differential & Corner Phase Decomposition
+```text
+zaxis,CG = wf zRC,front + (1 − wf) zRC,rear
+hroll = hCG,effective − zaxis,CG
+Gf = W wf AyG zRC,f              Gr = W (1 − wf) AyG zRC,r
+(Kφ,total − W hroll) φ = W AyG hCG,effective − (Af Gf + Ar Gr)
+```
 
-To accurately model **Corner Entry (Braking & Turn-In)**, **Mid-Corner (Apex)**, and **Corner Exit (Throttle Application)**:
+Here `Gi` is the direct geometric moment at axle `i`, and `Ai` is that axle's series transmission factor. Geometric load transfer compresses the tyre even though it bypasses the main spring, so the ground-reaction moment and chassis roll require the transmitted geometric terms. In the rigid-tyre limit, `Ai → 1` and the right-hand side reduces to `W AyG hroll`; that familiar limit is not the finite-tyre equation implemented here.
 
-1. **Sprung Mass Natural Frequency ($f_n$) & Critical Damping ($C_{\text{crit}}$):**
-   $$f_{n,\text{axle}} = \frac{1}{2\pi}\sqrt{\frac{K_{\text{ride,axle}}}{m_{s,\text{corner}}}}, \quad C_{\text{crit}} = 2\sqrt{K_w \cdot m_{s,\text{corner}}}, \quad \zeta = \frac{C_{\text{wheel}}}{C_{\text{crit}}}$$
-2. **Transient Load Transfer Modifier (Low-Speed Bump & Rebound):**
-   - During **Corner Entry** (brake application / trail-braking + turn-in roll rate $\dot{\phi} > 0, \dot{\theta} < 0$), **Front Low-Speed Bump** ($\zeta_{\text{LS,bump},f}$) and **Rear Low-Speed Rebound** ($\zeta_{\text{LS,reb},r}$) govern how rapidly vertical load shifts onto the front axle and off the inside rear tire.
-   - During **Corner Exit** (throttle application + unwinding steer $\dot{\theta} > 0$), **Rear Low-Speed Bump** ($\zeta_{\text{LS,bump},r}$) and **Front Low-Speed Rebound** ($\zeta_{\text{LS,reb},f}$) govern rearward squat rate and transient traction vs. exit understeer.
-   - **High-Speed Damping** ($\zeta_{\text{HS,bump}}, \zeta_{\text{HS,reb}}$) governs wheel compliance over curbs and surface bumps; excessive high-speed damping ($\zeta_{\text{HS}} > 0.55$) causes contact patch skipping/chatter.
-3. **Differential & Drivetrain Locking Effects:**
-   - Under braking/deceleration (Entry), high LSD deceleration lock or preload creates a stabilizing yaw-damping moment on the driven axle (increasing entry understeer stability, reducing trail-brake oversteer on `RR`/`MR`).
-   - Under corner exit throttle, LSD acceleration lock balances inside/outside driven wheel traction up to saturation, after which excess power on `RR`/`MR`/`FR` saturates the rear friction circles into power oversteer, or on `FF` saturates the front friction circles into power understeer.
+The `W hroll φ` term is the small-angle gravity moment from lateral CG displacement in this equivalent rigid-body approximation. The implementation uses total mass for the equivalent body; it does not separately solve sprung/unsprung roll dynamics. Its roll subsystem uses nominal axle lateral forces `W wf AyG` and `W (1 − wf) AyG`, rather than feeding the differential-induced yaw-allocation correction in section 6 back into roll. There is no unexplained `0.45` stiffness multiplier or minimum 40 mm roll arm.
+
+Because the assumed roll-centre profile changes with heave and roll, the engine iterates the equilibrium. Nonpositive effective stiffness, excessive roll for the small-angle approximation, or nonconvergence is reported as an invalid roll-equilibrium request.
+
+For front elastic roll fraction `q`, let `Melastic = Kφ,total φ`:
+
+```text
+Mground,f = q Melastic + Af Gf
+Mground,r = (1 − q) Melastic + Ar Gr
+ΔFz,lat,f = Mground,f / tf
+ΔFz,lat,r = Mground,r / tr
+TLLTDf = ΔFz,lat,f / (ΔFz,lat,f + ΔFz,lat,r)
+```
+
+In steady Apex, `q = FRSR`. Entry/Exit add a labelled illustrative damper shift, bounded to keep `q` in `[0,1]`. This adds equal/opposite changes to front/rear ground moments and preserves their sum. The geometric roll-centre reaction bypasses the main springs but still acts through tyre compliance; ARB reaction is not treated as main-spring force.
+
+### Corrected roll-axis example
+
+With `wf = 0.38`, front/rear RCs `38/72 mm` and CG `465 mm`:
+
+```text
+zaxis = 0.38 × 38 + 0.62 × 72 = 59.08 mm
+hroll = 465 − 59.08 = 405.92 mm
+```
+
+Keeping the historical example's stated lowered CG `441.2 mm` and RCs `−25/36 mm` gives `zaxis = 12.82 mm`, `hroll = 428.38 mm`: an increase of `22.46 mm` or `5.53%`. These values illustrate interpolation; whether a real lowered car follows those RCs or develops understeer requires actual geometry and tyre evidence.
+
+## 5. Pitch and suspension travel
+
+Let `sf` and `sr` be the applicable longitudinal spring fractions from section 2:
+
+```text
+Ef = Df − ΔFz,long sf             Er = Dr + ΔFz,long sr
+ΔFnormal,f = Df − ΔFz,long        ΔFnormal,r = Dr + ΔFz,long
+bodyCompressionF [mm] = Ef/(2 Kw,f) + ΔFnormal,f/(2 Kt,f)
+bodyCompressionR [mm] = Er/(2 Kw,r) + ΔFnormal,r/(2 Kt,r)
+θpitch [rad] = (bodyCompressionR − bodyCompressionF) / Lmm
+```
+
+The springs see the elastic fraction `Ei`, while the tyres see the **full normal-load change**, including any load routed through anti-geometry links. Only when the spring and tyre receive the same load can these two deflections be replaced by a single series ride-rate expression.
+
+This solves axle heave before calculating pitch. With no anti-geometry, four equal per-wheel ride rates `k` and a symmetric wheelbase, moment balance gives `Kpitch = 4 k(L/2)² = kL²`, rather than `kL²/4`. Asymmetric rates and aero are handled through the respective axle deflections.
+
+Main-suspension travel excludes tyre compression:
+
+```text
+heaveTravel,i [mm] = Ei / (2 Kw,i)
+rollTravel,i [mm] = (φ − Mground,i/Kφ,tyre,i) × trackMM,i/2
+outsideTravel,i = heaveTravel,i + rollTravel,i
+insideTravel,i  = heaveTravel,i − rollTravel,i
+```
+
+The relative suspension-roll angle is chassis roll minus tyre roll. Thus geometric reaction affects tyre deflection and relative suspension angle, without being mislabelled as main-spring force. Dynamic camber uses this suspension travel plus the explicitly assumed geometry gains.
+
+## 6. Tyre force demand, capacity and unloading
+
+Without lateral aero, total requested lateral force obeys:
+
+```text
+Σ Fy,demand = m g AyG
+Σ Fx,demand = m g AxG
+```
+
+Downforce is not added to inertial demand. Longitudinal demand follows selected brake/drive splits and a labelled illustrative differential-lock allocation. With `s = −1` for a left turn and `+1` for a right turn, the magnitude allocation is:
+
+```text
+Mz,Fx = tf/2 (Fx,FL − Fx,FR) + tr/2 (Fx,RL − Fx,RR)
+Fy,demand,f = wf m g AyG − Mz,Fx/(s L)
+Fy,demand,r = m g AyG − Fy,demand,f
+```
+
+This satisfies the selected planar yaw moment balance. Forces are treated in vehicle axes; a complete steered-tyre coordinate transformation and solved lateral/yaw state are not included. Tyre demands remain requests rather than forces guaranteed achievable by the available tyres.
+
+The project tyre illustration combines a load-sensitivity power law, a tyre-width nominal-load assumption, pressure/camber efficiency factors and a surface/compliance factor. The width exponent, nominal reference, efficiency curves and slip polynomials have no supplied experimental fit. A wider section is not a universal law for proportionally larger contact-patch area or tyre load rating. This is **not a fitted Pacejka Magic Formula model**.
+
+With the selected isotropic friction-circle estimate:
+
+```text
+Fmax = μeffective Fz
+Fy,reserve = √max(0, Fmax² − Fx,demand²)
+u = √(Fx,demand² + Fy,demand²) / Fmax
+```
+
+There is no minimum 20% lateral reserve when longitudinal demand already exceeds capacity. Utilization can exceed 100%; saturation is reported. At `Fz = 0`, capacity is zero and utilization is displayed as unloaded/undefined, not usable grip. Slip curves are bounded illustrations; saturation does not produce a solved steady sliding angle.
+
+At ordinary four-contact states, per-axle normal load is split as `Fz,axle/2 ± ΔFz,lat`. If this requests a negative contact load, the display sets the unloaded corner to zero and marks the request outside the four-contact model. Axle-lift display loads are renormalized to preserve the total normal load. These display limits are not a solved three-contact/rollover response and cannot establish that the requested acceleration is achievable.
+
+## 7. Illustrative geometry and damper profiles
+
+Live camber and roll-centre calculations use the generic profiles in `archetypes.ts`. Their camber gains, roll-loss factors, migration rates and lowering thresholds are **assumptions**. They are not inferred from the suspension-type name, and the standalone spatial solver is not wired into live telemetry. Measured hardpoints or validated travel/steer tables are required for a vehicle-specific geometry model.
+
+`transientDampers.ts` maps generic 1–20 settings to a firmness/damping-ratio illustration and phase-based load-distribution/compliance modifiers. More clicks means firmer **within this model**; actual damper adjustment conventions and force/velocity curves vary. There is no time integration, wheel-hop calculation, yaw-response transient, measured shaft velocity, damper temperature or manufacturer calibration.
+
+No universal 25–35% anti-geometry optimum or binding threshold is established. Any remaining numeric threshold inside a generic compliance modifier is a project assumption with no claim of general physical applicability.
+
+## 8. Spatial helper and recommendation interpretation
+
+The wishbone helper intersects the upper ball-joint circle with the sphere centred on the current lower ball joint whose radius is the rigid upright length. Its scalar constraint is:
+
+```text
+A cos(θupper) + B sin(θupper) + C = 0
+```
+
+The phase solution `R cos(θupper − atan2(B,A)) = −C`, with `R = hypot(A,B)`, covers the ordinary intersection, tangency, the former half-angle linear case, and the solution at `θ = π`. Feasibility, degenerate axes and finite inputs are checked. The closest periodic solution to the supplied preceding angle follows the assembly branch. A solved result must satisfy the upright-length residual tolerance. Underdetermined intersections are identified; infeasible states do not return fabricated geometry.
+
+Recommendation ranking uses the same visible setup, phase, surface and driver scenario as Preview/Apply. No-op patches are excluded. Understeer/oversteer guidance ranks a signed improvement toward neutral in the illustrative balance score; a patch that worsens the symptom or overshoots the opposite limit is excluded. Exit-traction guidance uses a declared worst-driven-wheel demand/capacity proxy. Turn-in response, transient braking stability and bump-contact-force variation are not simulated objectives; related guidance remains unranked investigation candidates. Internal ordering scores are never probabilities.
+
+## 9. Traceability and validation boundary
+
+The [README source table](../README.md#sources-and-assumption-traceability) links official author/publisher material, Milliken's measured-input modelling approach and official vehicle/tyre implementation references. Those sources establish useful principles and source identity, not experimental validation of this project's constants. The original PDF and historical diagrams can contain superseded claims and are not an authority for the revised engine.
+
+Regression tests verify the encoded algebraic constraints, boundary behaviour, signed recommendation benefit and scenario consistency. Real-vehicle calibration still requires tyre force/deflection data, suspension travel/steer geometry, actual corner weights, mass properties, ARB rates and damper force/velocity measurements, with operating ranges recorded. Native iOS/Android execution remains separate from web verification.
+
+
+## 10. User downforce ratings and display-only projection
+
+`src/engine/aero.ts` converts a force rating and a positive reference speed into the single physical aero parameter:
+
+```text
+ClA = Dref / (0.5 ρ vref²)
+D(v) = 0.5 ρ ClA v² = Dref (v/vref)²
+ρ = 1.225 kg/m³; v and vref in m/s; D in N
+```
+
+The interface accepts pounds-force and mph, converts internally, and preserves `aeroClA` when merely changing the displayed reference speed. The front/rear split allocates this normal force to the axles before the existing transfer calculation. Neither mass nor prescribed inertial force demand changes. Tests cover inverse conversion, reference invariance, speed-squared ratios, zero aero, axle/wheel conservation and unchanged lateral inertia. A zero-speed lateral-G request receives an explicit model-range warning and is excluded from quantitative recommendation ranking.
+
+The artwork, steering gain (5×), toe gain (12×), ±42° display cap, projected camber sidewall and rate-dependent ARB strokes are diagram conventions. They are never inputs to load, geometry, tyre-force or recommendation calculations. The enhanced drawing evaluates zero-toe geometric steering separately so a near-straight telemetry clamp cannot distort the exaggerated toe offset. Numerical telemetry remains the original model output.

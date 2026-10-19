@@ -19,7 +19,7 @@ import {
   WheelId,
   simulateVehicleState,
   solveDiagnosticRecommendations,
-  solveSpringRateForTargetRideFreqHz,
+  solveRideFrequencyTarget,
 } from '../engine';
 
 export type AppModeTab = 'wizard' | 'sandbox';
@@ -39,8 +39,9 @@ export interface TuningStoreState {
   setup: VehicleSetup;
   driver: DriverInputState;
   currentSim: SimulationResult;
+  frequencyNotice: string | null;
 
-  // Pinned Baseline Snapshot for Ghost/Delta comparison
+  // Pinned setup, evaluated under the current driver scenario for fair comparison
   pinnedBaseline: {
     setup: VehicleSetup;
     driver: DriverInputState;
@@ -89,7 +90,7 @@ const initialRecs = solveDiagnosticRecommendations(initialSetup, initialDriver, 
 });
 
 export const useTuningStore = create<TuningStoreState>((set, get) => ({
-  activeTab: 'wizard',
+  activeTab: 'sandbox',
   themeMode: 'dark',
   scopeFilter: 'all',
 
@@ -100,6 +101,7 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
   setup: initialSetup,
   driver: initialDriver,
   currentSim: initialSim,
+  frequencyNotice: null,
   pinnedBaseline: {
     setup: initialSetup,
     driver: initialDriver,
@@ -146,11 +148,8 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
     const nextBaseline = pinnedBaseline
       ? {
           ...pinnedBaseline,
-          driver: { ...pinnedBaseline.driver, cornerPhase },
-          sim: simulateVehicleState(pinnedBaseline.setup, {
-            ...pinnedBaseline.driver,
-            cornerPhase,
-          }),
+          driver: { ...nextDriver },
+          sim: simulateVehicleState(pinnedBaseline.setup, nextDriver),
         }
       : null;
 
@@ -178,6 +177,7 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
     set({
       setup: nextSetup,
       currentSim,
+      frequencyNotice: null,
       pinnedBaseline: {
         setup: nextSetup,
         driver,
@@ -225,30 +225,23 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
   applyRideFrequencyPreset: (presetId) => {
     const { setup } = get();
     const preset = RIDE_FREQUENCY_PRESETS[presetId];
-    const frontSpringRateNmm = solveSpringRateForTargetRideFreqHz(
-      preset.targetFrontHz,
-      setup,
-      'front'
-    );
-    const rearSpringRateNmm = solveSpringRateForTargetRideFreqHz(
-      preset.targetRearHz,
-      setup,
-      'rear'
-    );
+    const front = solveRideFrequencyTarget(preset.targetFrontHz, setup, 'front');
+    const rear = solveRideFrequencyTarget(preset.targetRearHz, setup, 'rear');
     get().updateSetup({
-      frontSpringRateNmm,
-      rearSpringRateNmm,
+      frontSpringRateNmm: front.springRateNmm,
+      rearSpringRateNmm: rear.springRateNmm,
     });
+    set({ frequencyNotice: [frequencyLimitNotice('Front', front), frequencyLimitNotice('Rear', rear)]
+      .filter(Boolean).join(' ') || null });
   },
 
   setTargetRideFrequencyHz: (axle, targetHz) => {
     const { setup } = get();
-    const newSpringRate = solveSpringRateForTargetRideFreqHz(targetHz, setup, axle);
-    if (axle === 'front') {
-      get().updateSetup({ frontSpringRateNmm: newSpringRate });
-    } else {
-      get().updateSetup({ rearSpringRateNmm: newSpringRate });
-    }
+    const result = solveRideFrequencyTarget(targetHz, setup, axle);
+    get().updateSetup(axle === 'front'
+      ? { frontSpringRateNmm: result.springRateNmm }
+      : { rearSpringRateNmm: result.springRateNmm });
+    set({ frequencyNotice: frequencyLimitNotice(axle === 'front' ? 'Front' : 'Rear', result) });
   },
 
   updateSetup: (patch) => {
@@ -263,6 +256,7 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
     set({
       setup: nextSetup,
       currentSim,
+      frequencyNotice: null,
       recommendations,
       previewRecommendationId: null,
     });
@@ -308,10 +302,10 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
   clearBaseline: () => set({ pinnedBaseline: null }),
 
   revertToBaseline: () => {
-    const { pinnedBaseline, selectedSymptom, scopeFilter } = get();
+    const { pinnedBaseline, driver, selectedSymptom, scopeFilter } = get();
     if (!pinnedBaseline) return;
     const nextSetup = { ...pinnedBaseline.setup };
-    const nextDriver = { ...pinnedBaseline.driver };
+    const nextDriver = { ...driver };
     const currentSim = simulateVehicleState(nextSetup, nextDriver);
     const recommendations = solveDiagnosticRecommendations(nextSetup, nextDriver, {
       symptom: selectedSymptom,
@@ -322,6 +316,7 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
       setup: nextSetup,
       driver: nextDriver,
       currentSim,
+      frequencyNotice: null,
       recommendations,
       previewRecommendationId: null,
     });
@@ -364,9 +359,28 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
       setup: nextSetup,
       driver: nextDriver,
       currentSim: nextSim,
-      pinnedBaseline: baselineToKeep,
+      pinnedBaseline: {
+        ...baselineToKeep,
+        driver: { ...nextDriver },
+        sim: simulateVehicleState(baselineToKeep.setup, nextDriver),
+      },
+      frequencyNotice: null,
       recommendations,
       previewRecommendationId: null,
     });
   },
 }));
+
+function frequencyLimitNotice(
+  axle: string,
+  result: ReturnType<typeof solveRideFrequencyTarget>
+): string | null {
+  if (result.status === 'achieved') return null;
+  const reason = result.limitReason === 'minimum_spring_rate'
+    ? 'minimum spring rate'
+    : result.limitReason === 'maximum_spring_rate'
+    ? 'maximum spring rate'
+    : 'tyre stiffness / spring rate limit';
+  return `${axle} target ${result.requestedFrequencyHz.toFixed(2)} Hz is outside the achievable range. ` +
+    `Achieved ${result.achievedFrequencyHz.toFixed(2)} Hz at ${result.springRateNmm.toFixed(0)} N/mm (${reason}).`;
+}

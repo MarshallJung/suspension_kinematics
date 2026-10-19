@@ -16,7 +16,7 @@ import {
 } from '../index';
 
 describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => {
-  it('preserves exact upright kingpin length and generates negative camber gain in Weierstrass arc-sphere solver (PDF pp. 4-5)', () => {
+  it('preserves exact upright kingpin length and generates negative camber gain in Weierstrass arc-sphere solver', () => {
     // Unequal-length double wishbone: shorter upper control arm (240mm) vs longer lower control arm (360mm)
     const lowerIn1 = { x: 150, y: 250, z: 180 };
     const lowerIn2 = { x: -150, y: 250, z: 180 };
@@ -53,12 +53,12 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
     expect(solved.camberChangeDeg).toBeLessThan(0);
   });
 
-  it('computes wheel rate K_w = K_s * MR^2 * sin^2(theta_spring) and tubular ARB stiffness (PDF pp. 7-8)', () => {
+  it('computes wheel rate K_w = K_s * measured MR^2 and tubular ARB stiffness', () => {
     const kw = calculateWheelRateNmm(100, 0.85, 90);
     expect(kw).toBeCloseTo(72.25, 2);
 
     const kwInclined = calculateWheelRateNmm(100, 0.85, 60);
-    expect(kwInclined).toBeCloseTo(72.25 * 0.75, 2);
+    expect(kwInclined).toBeCloseTo(72.25, 2);
 
     // Solid vs hollow ARB stiffness increases with outer diameter^4
     const arbSmall = calculateTubularArbRollStiffnessNmRad({
@@ -102,7 +102,7 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
     }
   });
 
-  it('enforces Anti-Dive and Anti-Squat invariance on total longitudinal weight transfer while reducing pitch angle (PDF pp. 5-6, 13)', () => {
+  it('enforces Anti-Dive and Anti-Squat invariance on total longitudinal weight transfer while reducing pitch angle', () => {
     const adPct = calculateAntiDivePercentage({
       svicHeightMm: 120,
       svicLengthMm: 1400,
@@ -140,10 +140,12 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
       zeroAntiDive.longitudinalLoadTransferN,
       2
     );
-    // Dynamic nose dive pitch angle magnitude must be significantly smaller with 60% Anti-Dive
-    expect(Math.abs(highAntiDive.bodyPitchDeg)).toBeLessThan(
-      Math.abs(zeroAntiDive.bodyPitchDeg) * 0.5
-    );
+    // Front anti-dive reduces front suspension compression only. Rear extension
+    // and tyre compression remain; derive the pitch change from that load path.
+    const expectedPitchReductionDeg = -zeroAntiDive.longitudinalLoadTransferN * 0.6 /
+      (2 * zeroAntiDive.frontWheelRateNmm * baseSetup.wheelbaseMm) * 180 / Math.PI;
+    expect(highAntiDive.bodyPitchDeg - zeroAntiDive.bodyPitchDeg)
+      .toBeCloseTo(expectedPitchReductionDeg, 8);
   });
 
   it('models the Over-Lowering Geometry Trap on MacPherson struts (roll center drops faster than CG)', () => {
@@ -165,7 +167,7 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
     ).toBe(true);
   });
 
-  it('satisfies all Scenario A & Scenario B deterministic tuning matrix rules (PDF pp. 12-13)', () => {
+  it('illustrates selected tuning tendencies in the chosen fixture', () => {
     const baseSetup = DRIVETRAIN_ARCHETYPES.MR.defaultSetup;
     const baseSim = simulateVehicleState(baseSetup, DEFAULT_DRIVER_INPUT);
 
@@ -230,7 +232,7 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
     expect(shopRecs.every((r) => r.scope === 'shop')).toBe(true);
   });
 
-  it('models Tire Width & Square Setup physics (e.g. Porsche 944 225/255 Staggered vs 255/255 Square)', () => {
+  it('applies the illustrative tire-width profile consistently', () => {
     const frStaggerSetup = DRIVETRAIN_ARCHETYPES.FR.defaultSetup; // 225mm F / 255mm R
     const frSquareSetup = {
       ...frStaggerSetup,

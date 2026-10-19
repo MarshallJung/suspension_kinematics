@@ -1,1287 +1,265 @@
-import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
-import Svg, {
-  Circle,
-  Defs,
-  G,
-  Line,
-  LinearGradient,
-  Path,
-  Rect,
-  Stop,
-  Text as SvgText,
-} from 'react-native-svg';
-import {
-  CornerPhase,
-  SimulationResult,
-  WheelId,
-  WheelTelemetry,
-  kmhToMph,
-  newtonsToLbs,
-} from '../../engine';
+import React, { useState } from 'react';
+import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import Svg, { Circle, G, Image as SvgImage, Line, Rect, Path, Text as SvgText } from 'react-native-svg';
+import { CornerPhase, SimulationResult, WheelId, WheelTelemetry, calculateAckermannSteerAngles, phaseAccelerations, kmhToMph, newtonsToLbs } from '../../engine';
+import { TyreGlyph } from './TyreGlyph';
 import { ThemePalette } from '../../theme/colors';
 
 interface ChassisTopDownCanvasProps {
-  sim: SimulationResult;
-  baselineSim?: SimulationResult | null;
-  previewSim?: SimulationResult | null;
-  previewTitle?: string | null;
-  selectedWheel: WheelId | null;
-  onSelectWheel: (wheel: WheelId) => void;
-  onSelectPhase: (phase: CornerPhase) => void;
-  onToggleTurnDirection: () => void;
-  theme: ThemePalette;
+  sim: SimulationResult; baselineSim?: SimulationResult | null; previewSim?: SimulationResult | null;
+  previewTitle?: string | null; selectedWheel: WheelId | null; onSelectWheel: (wheel: WheelId) => void;
+  onSelectPhase: (phase: CornerPhase) => void; onToggleTurnDirection: () => void; theme: ThemePalette;
 }
-
-/**
- * Spacious 420x420 coordinate system:
- * - Track width between left (cx=96) and right (cx=324) wheels is 228px (68% wider than before)
- * - Wheelbase between front (cy=112) and rear (cy=312) axles is 200px
- * - Gives friction circles, tire footprints, slip vectors, and chassis force arrows generous room.
- */
-const WHEEL_POSITIONS: Record<WheelId, { cx: number; cy: number }> = {
-  FL: { cx: 96, cy: 112 },
-  FR: { cx: 324, cy: 112 },
-  RL: { cx: 94, cy: 312 },
-  RR: { cx: 326, cy: 312 },
+const WHEELS: WheelId[] = ['FL', 'FR', 'RL', 'RR'];
+const POSITIONS: Record<WheelId, { x: number; y: number; plotX: number; plotY: number }> = {
+  FL: { x: 244, y: 165, plotX: 105, plotY: 150 }, FR: { x: 456, y: 165, plotX: 595, plotY: 150 },
+  RL: { x: 244, y: 425, plotX: 105, plotY: 442 }, RR: { x: 456, y: 425, plotX: 595, plotY: 442 },
 };
+const usageColor = (w: WheelTelemetry, t: ThemePalette) => w.dynamicFzN <= 0 || w.gripUtilizationPct > 100
+  ? t.criticalColor : w.gripUtilizationPct > 85 ? t.warningColor : t.accentPrimary;
+const balanceColor = (score: number, t: ThemePalette) => score > 6 ? t.understeerColor : score < -6 ? t.oversteerColor : t.neutralColor;
+const scoreName = (score: number) => Math.abs(score) < 6 ? 'Near neutral' : `${Math.abs(score).toFixed(0)} ${score > 0 ? 'understeer' : 'oversteer'}`;
 
-function getUtilizationColor(utilizationPct: number, theme: ThemePalette): string {
-  if (utilizationPct >= 100) return theme.criticalColor;
-  if (utilizationPct >= 88) return theme.warningColor;
-  if (utilizationPct >= 70) return theme.accentPrimary;
-  return theme.neutralColor;
-}
-
-function getBalanceColor(score: number, theme: ThemePalette): string {
-  if (score >= 8) return theme.understeerColor;
-  if (score <= -8) return theme.oversteerColor;
-  return theme.neutralColor;
-}
-
-function formatScoreLabel(score: number): string {
-  if (Math.abs(score) < 5) return 'Neutral (0)';
-  if (score > 0) return `US +${score.toFixed(0)}`;
-  return `OS ${score.toFixed(0)}`;
-}
-
-export const ChassisTopDownCanvas: React.FC<ChassisTopDownCanvasProps> = ({
-  sim,
-  baselineSim,
-  previewSim,
-  previewTitle,
-  selectedWheel,
-  onSelectWheel,
-  onSelectPhase,
-  onToggleTurnDirection,
-  theme,
-}) => {
-  const activeSim = previewSim ?? sim;
-  const referenceSim = previewSim ? sim : baselineSim;
-
-  const isLeftTurn = activeSim.driver.turnDirection === 'left';
-  const turnSign = isLeftTurn ? -1 : 1;
-
-  // Longitudinal CG position between front axle (y=112) and rear axle (y=312)
-  const frontY = 112;
-  const rearY = 312;
-  const wheelbasePx = rearY - frontY;
-  // Distance from front axle to CG is (1 - frontWeightFraction) * L
-  const cgY = frontY + (1 - activeSim.setup.frontWeightFraction) * wheelbasePx;
-  const cgX = 210;
-
-  // Dynamic Weight Transfer Vector from CG
-  // In a left turn, lateral weight transfers to the RIGHT (+X)
-  const totalLatTransferN =
-    activeSim.kinematics.frontLateralLoadTransferN +
-    activeSim.kinematics.rearLateralLoadTransferN;
-  const latVectorPx =
-    Math.min(
-      68,
-      (totalLatTransferN / Math.max(1, activeSim.setup.massKg * 9.81 * 0.55)) * 62
-    ) * (isLeftTurn ? 1 : -1);
-
-  // Negative longitudinalLoadTransferN = forward transfer under braking (-Y towards front axle)
-  const longVectorPx = Math.max(
-    -58,
-    Math.min(
-      58,
-      (activeSim.kinematics.longitudinalLoadTransferN /
-        Math.max(1, activeSim.setup.massKg * 9.81 * 0.35)) *
-        52
-    )
-  );
-
-  const loadTargetX = cgX + latVectorPx;
-  const loadTargetY = cgY + longVectorPx;
-
-  const inspectedWheelId: WheelId = selectedWheel ?? (isLeftTurn ? 'FR' : 'FL');
-  const inspectedWheel = activeSim.wheels[inspectedWheelId];
-  const refWheel = referenceSim ? referenceSim.wheels[inspectedWheelId] : null;
-
-  const inspectedDynamicLbs = Math.round(newtonsToLbs(inspectedWheel.dynamicFzN));
-  const inspectedStaticLbs = Math.round(newtonsToLbs(inspectedWheel.staticFzN));
-  const inspectedDeltaLbs = refWheel
-    ? Math.round(newtonsToLbs(inspectedWheel.dynamicFzN - refWheel.dynamicFzN))
-    : 0;
-
-  const speedMph = Math.round(kmhToMph(activeSim.driver.speedKmh));
-  const totalVehicleWeightLbs = Math.round(
-    newtonsToLbs(activeSim.setup.massKg * 9.81)
-  );
-
-  const activeBalanceScore = activeSim.balance.activeScore;
-  const refBalanceScore = referenceSim ? referenceSim.balance.activeScore : null;
-  const balanceDelta =
-    refBalanceScore !== null ? Number((activeBalanceScore - refBalanceScore).toFixed(1)) : null;
-
-  const phases: {
-    id: CornerPhase;
-    label: string;
-    short: string;
-    score: number;
-    refScore?: number;
-  }[] = [
-    {
-      id: 'entry',
-      label: '1. Entry (Brake & Turn-In)',
-      short: '1. ENTRY',
-      score: activeSim.balance.entryScore,
-      refScore: referenceSim?.balance.entryScore,
-    },
-    {
-      id: 'mid',
-      label: '2. Mid-Corner (Apex)',
-      short: '2. APEX',
-      score: activeSim.balance.midScore,
-      refScore: referenceSim?.balance.midScore,
-    },
-    {
-      id: 'exit',
-      label: '3. Exit (Throttle)',
-      short: '3. EXIT',
-      score: activeSim.balance.exitScore,
-      refScore: referenceSim?.balance.exitScore,
-    },
+export function ChassisTopDownCanvas({ sim, baselineSim, previewSim, previewTitle, selectedWheel,
+  onSelectWheel, onSelectPhase, onToggleTurnDirection, theme }: ChassisTopDownCanvasProps) {
+  const { height: viewportHeight, width: viewportWidth } = useWindowDimensions();
+  const maxFigureHeight = Math.max(viewportHeight < 500 ? 220 : 280, Math.min(490, viewportHeight - 365));
+  const [engineering, setEngineering] = useState(false);
+  const [enhancedTyres, setEnhancedTyres] = useState(true);
+  const [expanded, setExpanded] = useState(false);
+  const [figureWidth, setFigureWidth] = useState(700);
+  const fontScale = Math.max(1, 600 / figureWidth);
+  const compact = figureWidth < 560;
+  const narrowFigure = figureWidth < 330;
+  const veryNarrow = viewportWidth < 370;
+  const active = previewSim ?? sim;
+  const reference = previewSim ? sim : baselineSim;
+  const referenceLabel = previewSim ? 'current setup' : 'baseline';
+  const selected = selectedWheel ?? (active.driver.turnDirection === 'left' ? 'FR' : 'FL');
+  const wheel = active.wheels[selected];
+  const refWheel = reference?.wheels[selected];
+  const turnSign = active.driver.turnDirection === 'left' ? -1 : 1;
+  const k = active.kinematics;
+  const speedMs = active.driver.speedKmh / 3.6;
+  const lateralG = phaseAccelerations(active.driver, active.driver.cornerPhase).lateralG;
+  const nominalSteerDeg = speedMs > 0 ? Math.atan(active.setup.wheelbaseMm / 1000 * 9.81 * lateralG / (speedMs * speedMs)) * 180 / Math.PI : 0;
+  // Recover geometric steering directly, rather than undoing toe after the
+  // telemetry helper's non-negative angle clamp near straight ahead.
+  const geometricSteer = nominalSteerDeg > 0 ? calculateAckermannSteerAngles({
+    nominalSteerAngleDeg: nominalSteerDeg, trackWidthMm: active.setup.frontTrackMm,
+    wheelbaseMm: active.setup.wheelbaseMm, ackermannPct: active.setup.ackermannPct, frontStaticToeDeg: 0,
+  }) : { insideSteerDeg: 0, outsideSteerDeg: 0 };
+  const cgY = 165 + (1 - active.setup.frontWeightFraction) * 260;
+  const frontBarWidth = 2 + Math.max(0, active.setup.frontArbStiffnessNmPerDeg) / 950 * 12;
+  const rearBarWidth = 2 + Math.max(0, active.setup.rearArbStiffnessNmPerDeg) / 950 * 12;
+  const transferScale = 70 / Math.max(1, active.setup.massKg * 9.81 * 0.5);
+  const transferX = -turnSign * (k.frontLateralLoadTransferN + k.rearLateralLoadTransferN) * transferScale;
+  const transferY = k.longitudinalLoadTransferN * transferScale;
+  const transferShrink = Math.min(1, 60 / Math.max(1, Math.hypot(transferX, transferY)));
+  const phases: { id: CornerPhase; name: string; score: number }[] = [
+    { id: 'entry', name: 'Entry', score: active.balance.entryScore },
+    { id: 'mid', name: 'Apex', score: active.balance.midScore },
+    { id: 'exit', name: 'Exit', score: active.balance.exitScore },
   ];
+  const metric = (title: string, value: string, detail: string, color = theme.textPrimary) =>
+    <View style={styles.metric} key={title}>
+      <Text style={[styles.metricLabel, { color: theme.textMuted }]}>{title}</Text>
+      <Text style={[styles.metricValue, { color }]}>{value}</Text>
+      <Text style={[styles.metricDetail, { color: theme.textMuted }]}>{detail}</Text>
+    </View>;
 
-  // Visual thickness of front and rear ARB bars
-  const frontArbStroke = Math.max(
-    2.2,
-    Math.min(6.5, activeSim.setup.frontArbStiffnessNmPerDeg / 135)
-  );
-  const rearArbStroke = Math.max(
-    2.2,
-    Math.min(6.5, activeSim.setup.rearArbStiffnessNmPerDeg / 135)
-  );
-
-  const isSquareTireSetup =
-    Math.abs(activeSim.setup.frontTireWidthMm - activeSim.setup.rearTireWidthMm) <= 5;
-
-  const renderCornerCard = (wheelId: WheelId) => {
-    const w = activeSim.wheels[wheelId];
-    const refW = referenceSim ? referenceSim.wheels[wheelId] : null;
-    const isSelected = inspectedWheelId === wheelId;
-    const utilColor = getUtilizationColor(w.gripUtilizationPct, theme);
-    const dynamicLbs = Math.round(newtonsToLbs(w.dynamicFzN));
-    const fzDeltaLbs = refW ? Math.round(newtonsToLbs(w.dynamicFzN - refW.dynamicFzN)) : 0;
-    const tireWidthMm = w.isFront
-      ? activeSim.setup.frontTireWidthMm
-      : activeSim.setup.rearTireWidthMm;
-
-    return (
-      <Pressable
-        key={`card-${wheelId}`}
-        onPress={() => onSelectWheel(wheelId)}
-        style={[
-          styles.cornerHudCard,
-          {
-            backgroundColor: isSelected ? theme.bgElevated : theme.bgSecondary,
-            borderColor: isSelected ? theme.accentPrimary : theme.borderSubtle,
-          },
-        ]}
-      >
-        <View style={styles.cornerHudTopRow}>
-          <View style={styles.cornerTitleGroup}>
-            <Text style={[styles.cornerWheelId, { color: theme.textPrimary }]}>
-              {wheelId}
-            </Text>
-            <Text
-              style={[
-                styles.cornerInOutBadge,
-                {
-                  color: w.isOutside ? theme.accentSecondary : theme.textMuted,
-                },
-              ]}
-            >
-              {w.isOutside ? 'OUTSIDE' : 'INSIDE'} • {tireWidthMm}mm
-            </Text>
-          </View>
-          <View
-            style={[
-              styles.cornerUtilPill,
-              { backgroundColor: utilColor + '22', borderColor: utilColor },
-            ]}
-          >
-            <Text style={[styles.cornerUtilText, { color: utilColor }]}>
-              {Math.round(w.gripUtilizationPct)}% Grip
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.cornerMetricsRow}>
-          <Text style={[styles.cornerMetricText, { color: theme.textSecondary }]}>
-            Load:{' '}
-            <Text style={{ color: theme.textPrimary, fontWeight: '800' }}>
-              {dynamicLbs} lbs
-            </Text>
-            {Math.abs(fzDeltaLbs) >= 3 ? (
-              <Text
-                style={{
-                  color: fzDeltaLbs > 0 ? theme.accentSecondary : theme.accentPrimary,
-                  fontWeight: '700',
-                }}
-              >
-                {` (${fzDeltaLbs > 0 ? `+${fzDeltaLbs}` : fzDeltaLbs})`}
-              </Text>
-            ) : null}
-          </Text>
-
-          <Text style={[styles.cornerMetricText, { color: theme.textSecondary }]}>
-            γ_dyn:{' '}
-            <Text style={{ color: theme.textPrimary, fontWeight: '700' }}>
-              {w.dynamicCamberDeg.toFixed(1)}°
-            </Text>
-          </Text>
-
-          <Text style={[styles.cornerMetricText, { color: theme.accentSecondary, fontWeight: '700' }]}>
-            α: {w.slipAngleDeg.toFixed(1)}°
-          </Text>
-        </View>
+  return <View style={[styles.container, { backgroundColor: theme.canvasBg, borderColor: theme.borderSubtle }]}>
+    <View style={[styles.heading, veryNarrow && { paddingHorizontal: 14 }]}>
+      <View style={{ flexShrink: 1 }}>
+        <Text style={[styles.eyebrow, { color: theme.textMuted }]}>FOUR-CORNER TELEMETRY</Text>
+        <Text style={[styles.title, { color: theme.textPrimary }]}>Vehicle overview</Text>
+      </View>
+      <Pressable accessibilityRole="button" accessibilityLabel="Toggle turn direction" onPress={onToggleTurnDirection}
+        style={[styles.toggle, { borderColor: theme.border }]}>
+        <Text style={{ color: theme.textSecondary, fontSize: 12, fontWeight: '600' }}>{active.driver.turnDirection === 'left' ? 'Left' : 'Right'} turn</Text>
       </Pressable>
-    );
-  };
-
-  return (
-    <View
-      style={[
-        styles.container,
-        { backgroundColor: theme.bgCard, borderColor: theme.border },
-      ]}
-    >
-      {/* Preview Banner if active */}
-      {previewSim && previewTitle ? (
-        <View style={[styles.previewBanner, { backgroundColor: theme.accentPrimary }]}>
-          <Text style={styles.previewBannerText}>
-            PREVIEWING ON CAR: {previewTitle} (Dashed rings = Current Setup)
-          </Text>
-        </View>
-      ) : null}
-
-      {/* 3-Phase Handling Balance Timeline Selector */}
-      <View style={[styles.phaseRow, { borderBottomColor: theme.borderSubtle }]}>
-        {phases.map((p) => {
-          const isSelected = activeSim.driver.cornerPhase === p.id;
-          const phaseColor = getBalanceColor(p.score, theme);
-          const delta =
-            p.refScore !== undefined ? Number((p.score - p.refScore).toFixed(1)) : null;
-
-          return (
-            <Pressable
-              key={p.id}
-              onPress={() => onSelectPhase(p.id)}
-              style={[
-                styles.phaseTab,
-                {
-                  backgroundColor: isSelected ? theme.bgElevated : 'transparent',
-                  borderColor: isSelected ? phaseColor : theme.borderSubtle,
-                },
-              ]}
-            >
-              <Text
-                style={[
-                  styles.phaseTabTitle,
-                  { color: isSelected ? theme.textPrimary : theme.textMuted },
-                ]}
-              >
-                {p.short}
-              </Text>
-              <View style={styles.phaseScoreRow}>
-                <Text style={[styles.phaseScoreValue, { color: phaseColor }]}>
-                  {formatScoreLabel(p.score)}
-                </Text>
-                {delta !== null && Math.abs(delta) >= 0.4 ? (
-                  <Text
-                    style={[
-                      styles.phaseDeltaBadge,
-                      { color: theme.textSecondary },
-                    ]}
-                  >
-                    ({delta > 0 ? `+${delta}` : delta})
-                  </Text>
-                ) : null}
-              </View>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      {/* Active Balance Meter Bar (Oversteer <-> Neutral <-> Understeer) */}
-      <View style={[styles.balanceMeterContainer, { backgroundColor: theme.bgSecondary }]}>
-        <View style={styles.balanceLabelsRow}>
-          <Text style={[styles.balancePoleLabel, { color: theme.oversteerColor }]}>
-            ◀ OVERSTEER (Rotate)
-          </Text>
-          <Pressable
-            onPress={onToggleTurnDirection}
-            style={[
-              styles.turnTogglePill,
-              { borderColor: theme.border, backgroundColor: theme.bgCard },
-            ]}
-          >
-            <Text style={[styles.turnToggleText, { color: theme.textPrimary }]}>
-              {isLeftTurn ? '↰ Left Turn' : '↱ Right Turn'} ({speedMph} mph,{' '}
-              {activeSim.driver.lateralG.toFixed(2)}G)
-            </Text>
-          </Pressable>
-          <Text style={[styles.balancePoleLabel, { color: theme.understeerColor }]}>
-            UNDERSTEER (Push) ▶
-          </Text>
-        </View>
-
-        <View
-          style={[
-            styles.meterTrack,
-            { backgroundColor: theme.canvasBg, borderColor: theme.borderSubtle },
-          ]}
-        >
-          {/* Center Neutral Tick */}
-          <View style={[styles.meterCenterTick, { backgroundColor: theme.neutralColor }]} />
-
-          {/* Ghost Reference Marker if Baseline/Preview active */}
-          {refBalanceScore !== null ? (
-            <View
-              style={[
-                styles.meterGhostMarker,
-                {
-                  left: `${Math.max(4, Math.min(96, 50 + refBalanceScore * 0.45))}%`,
-                  borderColor: theme.textMuted,
-                },
-              ]}
-            />
-          ) : null}
-
-          {/* Active Balance Indicator Pill */}
-          <View
-            style={[
-              styles.meterActiveThumb,
-              {
-                left: `${Math.max(4, Math.min(96, 50 + activeBalanceScore * 0.45))}%`,
-                backgroundColor: getBalanceColor(activeBalanceScore, theme),
-              },
-            ]}
-          />
-        </View>
-
-        <View style={styles.balanceSummaryRow}>
-          <Text
-            style={[
-              styles.balanceStatusText,
-              { color: getBalanceColor(activeBalanceScore, theme) },
-            ]}
-          >
-            {activeSim.balance.activeClassification}
-            {balanceDelta !== null && Math.abs(balanceDelta) >= 0.4
-              ? ` (${balanceDelta > 0 ? `+${balanceDelta} toward US` : `${balanceDelta} toward OS`} vs Baseline)`
-              : ''}
-          </Text>
-          <Text style={[styles.slipComparisonText, { color: theme.textSecondary }]}>
-            Slip Angles: α_F {activeSim.kinematics.frontAxleSlipAngleDeg.toFixed(1)}° vs α_R{' '}
-            {activeSim.kinematics.rearAxleSlipAngleDeg.toFixed(1)}°
-          </Text>
-        </View>
-      </View>
-
-      {/* Top Front-Axle Corner HUD Row (FL | FR) */}
-      <View style={[styles.cornerHudRow, { backgroundColor: theme.canvasBg }]}>
-        {renderCornerCard('FL')}
-        {renderCornerCard('FR')}
-      </View>
-
-      {/* Spacious 2D Top-Down SVG Telemetry Canvas */}
-      <View style={[styles.svgWrapper, { backgroundColor: theme.canvasBg }]}>
-        <Svg viewBox="0 0 420 420" width="100%" height={400}>
-          <Defs>
-            <LinearGradient id="chassisGrad" x1="0" y1="0" x2="0" y2="1">
-              <Stop offset="0%" stopColor={theme.chassisFill} stopOpacity="0.96" />
-              <Stop offset="100%" stopColor={theme.bgSecondary} stopOpacity="0.96" />
-            </LinearGradient>
-          </Defs>
-
-          {[40, 90, 140, 190, 240, 290, 340, 390].map((y) => (
-            <Line
-              key={`grid-h-${y}`}
-              x1={0}
-              y1={y}
-              x2={420}
-              y2={y}
-              stroke={theme.canvasGrid}
-              strokeWidth={1}
-            />
-          ))}
-          {[50, 105, 160, 210, 260, 315, 370].map((x) => (
-            <Line
-              key={`grid-v-${x}`}
-              x1={x}
-              y1={0}
-              x2={x}
-              y2={420}
-              stroke={theme.canvasGrid}
-              strokeWidth={1}
-            />
-          ))}
-
-          <Line
-            x1={210}
-            y1={14}
-            x2={210}
-            y2={406}
-            stroke={theme.border}
-            strokeWidth={1.2}
-            strokeDasharray="5,5"
-          />
-
-          <Path
-            d={
-              isLeftTurn
-                ? 'M 210 50 Q 198 20 148 16'
-                : 'M 210 50 Q 222 20 272 16'
-            }
-            stroke={theme.neutralColor}
-            strokeWidth={2.5}
-            strokeDasharray="4,4"
-            fill="none"
-          />
-          <SvgText
-            x={isLeftTurn ? 140 : 280}
-            y={19}
-            fill={theme.neutralColor}
-            fontSize="11"
-            fontWeight="800"
-            textAnchor={isLeftTurn ? 'end' : 'start'}
-          >
-            {isLeftTurn ? '◀ TURN PATH' : 'TURN PATH ▶'}
-          </SvgText>
-
-          {Math.abs(activeBalanceScore) >= 6 ? (
-            <G>
-              <Path
-                d={
-                  activeBalanceScore > 0
-                    ? isLeftTurn
-                      ? 'M 210 42 Q 246 34 274 42'
-                      : 'M 210 42 Q 174 34 146 42'
-                    : isLeftTurn
-                    ? 'M 210 378 Q 254 388 284 374'
-                    : 'M 210 378 Q 166 388 136 374'
-                }
-                stroke={getBalanceColor(activeBalanceScore, theme)}
-                strokeWidth={3.5}
-                fill="none"
-              />
-              <SvgText
-                x={210}
-                y={activeBalanceScore > 0 ? 33 : 402}
-                fill={getBalanceColor(activeBalanceScore, theme)}
-                fontSize="11"
-                fontWeight="800"
-                textAnchor="middle"
-              >
-                {activeBalanceScore > 0
-                  ? isLeftTurn
-                    ? 'NOSE PUSHING WIDE (UNDERSTEER ▶)'
-                    : '◀ NOSE PUSHING WIDE (UNDERSTEER)'
-                  : isLeftTurn
-                  ? 'TAIL ROTATING OUT (OVERSTEER ▶)'
-                  : '◀ TAIL ROTATING OUT (OVERSTEER)'}
-              </SvgText>
-            </G>
-          ) : null}
-
-          <Path
-            d="M 156 52 C 180 42, 240 42, 264 52 L 280 96 L 276 162 L 282 276 L 276 356 C 250 368, 170 368, 144 356 L 138 276 L 144 162 L 140 96 Z"
-            fill="url(#chassisGrad)"
-            stroke={theme.chassisStroke}
-            strokeWidth={2}
-          />
-          <Path
-            d="M 176 68 L 244 68 L 238 82 L 182 82 Z"
-            fill={theme.bgPrimary}
-            fillOpacity={0.38}
-            stroke={theme.chassisStroke}
-            strokeWidth={1}
-          />
-          <Path
-            d="M 158 140 Q 210 124 262 140 L 252 250 Q 210 264 168 250 Z"
-            fill={theme.bgPrimary}
-            fillOpacity={0.58}
-            stroke={theme.chassisStroke}
-            strokeWidth={1.4}
-          />
-          <Rect
-            x={138}
-            y={346}
-            width={144}
-            height={10}
-            rx={3}
-            fill={theme.bgElevated}
-            stroke={theme.chassisStroke}
-            strokeWidth={1.4}
-          />
-
-          <Line x1={164} y1={112} x2={96} y2={112} stroke={theme.textMuted} strokeWidth={3.2} />
-          <Line x1={256} y1={112} x2={324} y2={112} stroke={theme.textMuted} strokeWidth={3.2} />
-          <Path
-            d="M 112 112 L 154 92 L 266 92 L 308 112"
-            stroke={theme.understeerColor}
-            strokeWidth={frontArbStroke}
-            fill="none"
-            strokeOpacity={0.9}
-          />
-
-          <Line x1={164} y1={312} x2={94} y2={312} stroke={theme.textMuted} strokeWidth={3.2} />
-          <Line x1={256} y1={312} x2={326} y2={312} stroke={theme.textMuted} strokeWidth={3.2} />
-          <Path
-            d="M 110 312 L 154 332 L 266 332 L 310 312"
-            stroke={theme.oversteerColor}
-            strokeWidth={rearArbStroke}
-            fill="none"
-            strokeOpacity={0.9}
-          />
-
-          <Rect
-            x={124}
-            y={71}
-            width={172}
-            height={17}
-            rx={4}
-            fill={theme.bgPrimary}
-            fillOpacity={0.78}
-          />
-          <SvgText
-            x={210}
-            y={83}
-            fill={theme.understeerColor}
-            fontSize="10"
-            fontWeight="800"
-            textAnchor="middle"
-          >
-            {`TLLTD Front: ${(activeSim.kinematics.totalLateralLoadTransferDistributionFront * 100).toFixed(1)}% (FRSR ${(activeSim.kinematics.frontRollStiffnessRatio * 100).toFixed(0)}%)`}
-          </SvgText>
-
-          <Rect
-            x={124}
-            y={334}
-            width={172}
-            height={17}
-            rx={4}
-            fill={theme.bgPrimary}
-            fillOpacity={0.78}
-          />
-          <SvgText
-            x={210}
-            y={346}
-            fill={theme.oversteerColor}
-            fontSize="10"
-            fontWeight="800"
-            textAnchor="middle"
-          >
-            {`TLLTD Rear: ${((1 - activeSim.kinematics.totalLateralLoadTransferDistributionFront) * 100).toFixed(1)}% (Mass ${(100 - activeSim.setup.frontWeightFraction * 100).toFixed(0)}%)`}
-          </SvgText>
-
-          <Circle
-            cx={cgX}
-            cy={cgY}
-            r={9}
-            fill={theme.accentSecondary}
-            stroke={theme.bgPrimary}
-            strokeWidth={2}
-          />
-          <Line
-            x1={cgX - 8}
-            y1={cgY}
-            x2={cgX + 8}
-            y2={cgY}
-            stroke={theme.bgPrimary}
-            strokeWidth={1.8}
-          />
-          <Line
-            x1={cgX}
-            y1={cgY - 8}
-            x2={cgX}
-            y2={cgY + 8}
-            stroke={theme.bgPrimary}
-            strokeWidth={1.8}
-          />
-          <Line
-            x1={cgX}
-            y1={cgY}
-            x2={loadTargetX}
-            y2={loadTargetY}
-            stroke={theme.accentSecondary}
-            strokeWidth={3.8}
-          />
-          <Circle
-            cx={loadTargetX}
-            cy={loadTargetY}
-            r={5.5}
-            fill={theme.accentSecondary}
-          />
-          <Rect
-            x={cgX - 64}
-            y={cgY - 26}
-            width={128}
-            height={15}
-            rx={4}
-            fill={theme.bgPrimary}
-            fillOpacity={0.82}
-          />
-          <SvgText
-            x={cgX}
-            y={cgY - 15}
-            fill={theme.accentSecondary}
-            fontSize="9.5"
-            fontWeight="800"
-            textAnchor="middle"
-          >
-            {`CG (${Math.round(activeSim.setup.frontWeightFraction * 100)}/${Math.round((1 - activeSim.setup.frontWeightFraction) * 100)} • ${totalVehicleWeightLbs} lbs)`}
-          </SvgText>
-
-          {(['FL', 'FR', 'RL', 'RR'] as WheelId[]).map((wheelId) => {
-            const w: WheelTelemetry = activeSim.wheels[wheelId];
-            const refW: WheelTelemetry | null = referenceSim ? referenceSim.wheels[wheelId] : null;
-            const pos = WHEEL_POSITIONS[wheelId];
-            const isSelected = inspectedWheelId === wheelId;
-            const utilColor = getUtilizationColor(w.gripUtilizationPct, theme);
-
-            const fzRadius = Math.max(18, Math.min(50, Math.sqrt(w.dynamicFzN / 3500) * 33));
-            const refFzRadius = refW
-              ? Math.max(18, Math.min(50, Math.sqrt(refW.dynamicFzN / 3500) * 33))
-              : null;
-
-            const utilRadius = fzRadius * Math.min(1.15, w.gripUtilizationPct / 100);
-
-            const tireWidthMm = w.isFront
-              ? activeSim.setup.frontTireWidthMm
-              : activeSim.setup.rearTireWidthMm;
-            const tireWidthPx = Math.max(17, Math.min(31, (tireWidthMm / 245) * 23));
-            const tireHeightPx = 46;
-
-            const isLeftWheel = wheelId === 'FL' || wheelId === 'RL';
-            const toeVisualSign = isLeftWheel ? 1 : -1;
-            const visualSteerDeg = w.isFront
-              ? turnSign * w.steerAngleDeg * 1.45 + toeVisualSign * w.staticToeAngleDeg * 6
-              : toeVisualSign * w.staticToeAngleDeg * 6;
-
-            const latForceRatio = Math.min(
-              1.15,
-              w.lateralFyDemandN / Math.max(1, w.maxTotalForceN)
-            );
-            const longForceRatio = Math.max(
-              -1.15,
-              Math.min(1.15, w.longitudinalFxN / Math.max(1, w.maxTotalForceN))
-            );
-            const forceVecX = pos.cx + (-turnSign) * latForceRatio * fzRadius;
-            const forceVecY = pos.cy - longForceRatio * fzRadius;
-
-            const badgeY = w.isFront ? pos.cy - fzRadius - 14 : pos.cy + fzRadius + 6;
-            const wheelDynamicLbs = Math.round(newtonsToLbs(w.dynamicFzN));
-
-            return (
-              <G key={wheelId}>
-                {isSelected ? (
-                  <Circle
-                    cx={pos.cx}
-                    cy={pos.cy}
-                    r={fzRadius + 8}
-                    fill="none"
-                    stroke={theme.accentPrimary}
-                    strokeWidth={2.2}
-                    strokeDasharray="4,3"
-                  />
-                ) : null}
-
-                {refFzRadius !== null ? (
-                  <Circle
-                    cx={pos.cx}
-                    cy={pos.cy}
-                    r={refFzRadius}
-                    fill="none"
-                    stroke={theme.textMuted}
-                    strokeWidth={1.6}
-                    strokeDasharray="4,4"
-                  />
-                ) : null}
-
-                <Circle
-                  cx={pos.cx}
-                  cy={pos.cy}
-                  r={fzRadius}
-                  fill={utilColor}
-                  fillOpacity={0.14}
-                  stroke={utilColor}
-                  strokeWidth={2.4}
-                />
-
-                <Circle
-                  cx={pos.cx}
-                  cy={pos.cy}
-                  r={utilRadius}
-                  fill={utilColor}
-                  fillOpacity={0.28}
-                />
-
-                <G transform={`translate(${pos.cx}, ${pos.cy}) rotate(${visualSteerDeg})`}>
-                  <Rect
-                    x={-tireWidthPx / 2}
-                    y={-tireHeightPx / 2}
-                    width={tireWidthPx}
-                    height={tireHeightPx}
-                    rx={4}
-                    fill={theme.bgPrimary}
-                    stroke={isSelected ? theme.accentPrimary : theme.textSecondary}
-                    strokeWidth={isSelected ? 2.4 : 1.6}
-                  />
-                  <Line
-                    x1={-tireWidthPx / 4}
-                    y1={-tireHeightPx / 2 + 4}
-                    x2={-tireWidthPx / 4}
-                    y2={tireHeightPx / 2 - 4}
-                    stroke={theme.border}
-                    strokeWidth={1}
-                  />
-                  <Line
-                    x1={tireWidthPx / 4}
-                    y1={-tireHeightPx / 2 + 4}
-                    x2={tireWidthPx / 4}
-                    y2={tireHeightPx / 2 - 4}
-                    stroke={theme.border}
-                    strokeWidth={1}
-                  />
-                  <Line
-                    x1={0}
-                    y1={-tireHeightPx / 2 + 3}
-                    x2={0}
-                    y2={-tireHeightPx / 2 - 10}
-                    stroke={theme.textPrimary}
-                    strokeWidth={2}
-                  />
-                </G>
-
-                <Line
-                  x1={pos.cx}
-                  y1={pos.cy}
-                  x2={pos.cx + (-turnSign) * Math.min(34, w.slipAngleDeg * 4.4)}
-                  y2={pos.cy - 34}
-                  stroke={theme.accentSecondary}
-                  strokeWidth={2}
-                  strokeDasharray="3,3"
-                />
-
-                <Line
-                  x1={pos.cx}
-                  y1={pos.cy}
-                  x2={forceVecX}
-                  y2={forceVecY}
-                  stroke={utilColor}
-                  strokeWidth={3.2}
-                />
-                <Circle cx={forceVecX} cy={forceVecY} r={3.8} fill={utilColor} />
-
-                <Rect
-                  x={pos.cx - 52}
-                  y={badgeY}
-                  width={104}
-                  height={16}
-                  rx={5}
-                  fill={theme.bgElevated}
-                  fillOpacity={0.92}
-                  stroke={isSelected ? theme.accentPrimary : theme.border}
-                  strokeWidth={1}
-                />
-                <SvgText
-                  x={pos.cx}
-                  y={badgeY + 11.5}
-                  fill={utilColor}
-                  fontSize="9.5"
-                  fontWeight="800"
-                  textAnchor="middle"
-                >
-                  {`${wheelId} ${Math.round(w.gripUtilizationPct)}% • ${wheelDynamicLbs} lbs`}
-                </SvgText>
-              </G>
-            );
-          })}
-        </Svg>
-
-        {/* Native React Native Pressable 4-Corner Hit-Target Overlay (avoids RNSVGGroup onPress Fabric warning) */}
-        <View style={styles.svgTouchOverlay} pointerEvents="box-none">
-          <View style={styles.svgTouchRow}>
-            <Pressable
-              style={styles.svgTouchQuadrant}
-              onPress={() => onSelectWheel('FL')}
-              accessibilityLabel="Select Front Left Wheel"
-            />
-            <Pressable
-              style={styles.svgTouchQuadrant}
-              onPress={() => onSelectWheel('FR')}
-              accessibilityLabel="Select Front Right Wheel"
-            />
-          </View>
-          <View style={styles.svgTouchRow}>
-            <Pressable
-              style={styles.svgTouchQuadrant}
-              onPress={() => onSelectWheel('RL')}
-              accessibilityLabel="Select Rear Left Wheel"
-            />
-            <Pressable
-              style={styles.svgTouchQuadrant}
-              onPress={() => onSelectWheel('RR')}
-              accessibilityLabel="Select Rear Right Wheel"
-            />
-          </View>
-        </View>
-      </View>
-
-      {/* Bottom Rear-Axle Corner HUD Row (RL | RR) */}
-      <View
-        style={[
-          styles.cornerHudRow,
-          styles.cornerHudBottomRow,
-          { backgroundColor: theme.canvasBg },
-        ]}
-      >
-        {renderCornerCard('RL')}
-        {renderCornerCard('RR')}
-      </View>
-
-      {/* Wheel Tap-to-Inspect & Live Dynamic Roll Centers / Ride Frequency Strip */}
-      <View
-        style={[
-          styles.inspectorCard,
-          { backgroundColor: theme.bgSecondary, borderTopColor: theme.borderSubtle },
-        ]}
-      >
-        <View style={styles.inspectorHeaderRow}>
-          <View style={styles.wheelSelectorPills}>
-            {(['FL', 'FR', 'RL', 'RR'] as WheelId[]).map((id) => {
-              const active = inspectedWheelId === id;
-              return (
-                <Pressable
-                  key={id}
-                  onPress={() => onSelectWheel(id)}
-                  style={[
-                    styles.wheelPill,
-                    {
-                      backgroundColor: active ? theme.accentPrimary : theme.bgCard,
-                      borderColor: active ? theme.accentPrimary : theme.border,
-                    },
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.wheelPillText,
-                      { color: active ? '#0B0F17' : theme.textSecondary },
-                    ]}
-                  >
-                    {id}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-          <Text style={[styles.inspectorTitle, { color: theme.textPrimary }]}>
-            {inspectedWheel.id} ({inspectedWheel.isOutside ? 'Outside Loaded' : 'Inside Unloaded'}{' '}
-            • {inspectedWheel.isFront ? activeSim.setup.frontTireWidthMm : activeSim.setup.rearTireWidthMm}mm)
-          </Text>
-        </View>
-
-        <View style={styles.metricsGrid}>
-          <View style={[styles.metricCell, { backgroundColor: theme.bgCard }]}>
-            <Text style={[styles.metricLabel, { color: theme.textMuted }]}>Dynamic Load Fz</Text>
-            <Text style={[styles.metricValue, { color: theme.textPrimary }]}>
-              {inspectedDynamicLbs} lbs
-              {refWheel && Math.abs(inspectedDeltaLbs) >= 2
-                ? ` (${inspectedDeltaLbs > 0 ? '+' : ''}${inspectedDeltaLbs})`
-                : ''}
-            </Text>
-            <Text style={[styles.metricSub, { color: theme.textMuted }]}>
-              Static: {inspectedStaticLbs} lbs
-            </Text>
-          </View>
-
-          <View style={[styles.metricCell, { backgroundColor: theme.bgCard }]}>
-            <Text style={[styles.metricLabel, { color: theme.textMuted }]}>Grip Circle</Text>
-            <Text
-              style={[
-                styles.metricValue,
-                { color: getUtilizationColor(inspectedWheel.gripUtilizationPct, theme) },
-              ]}
-            >
-              {inspectedWheel.gripUtilizationPct.toFixed(0)}% Used
-            </Text>
-            <Text style={[styles.metricSub, { color: theme.textMuted }]}>
-              μ_eff: {inspectedWheel.effectiveFrictionMu.toFixed(2)}
-            </Text>
-          </View>
-
-          <View style={[styles.metricCell, { backgroundColor: theme.bgCard }]}>
-            <Text style={[styles.metricLabel, { color: theme.textMuted }]}>Dynamic Camber</Text>
-            <Text style={[styles.metricValue, { color: theme.textPrimary }]}>
-              {inspectedWheel.dynamicCamberDeg.toFixed(2)}°
-            </Text>
-            <Text style={[styles.metricSub, { color: theme.textMuted }]}>
-              Δz: {inspectedWheel.suspensionDeflectionMm >= 0 ? '+' : ''}
-              {inspectedWheel.suspensionDeflectionMm.toFixed(1)} mm
-            </Text>
-          </View>
-
-          <View style={[styles.metricCell, { backgroundColor: theme.bgCard }]}>
-            <Text style={[styles.metricLabel, { color: theme.textMuted }]}>Chassis Attitude</Text>
-            <Text style={[styles.metricValue, { color: theme.textPrimary }]}>
-              Roll {activeSim.kinematics.bodyRollDeg.toFixed(1)}°
-            </Text>
-            <Text style={[styles.metricSub, { color: theme.textMuted }]}>
-              Pitch {activeSim.kinematics.bodyPitchDeg >= 0 ? '+' : ''}
-              {activeSim.kinematics.bodyPitchDeg.toFixed(1)}°
-            </Text>
-          </View>
-        </View>
-
-        {/* Live Kinematic & Roll Center / Ride Frequency Telemetry Cards */}
-        <View style={[styles.kinematicCardsRow, { borderTopColor: theme.borderSubtle }]}>
-          <View style={[styles.kinematicMiniCard, { backgroundColor: theme.bgCard }]}>
-            <Text style={[styles.kinematicMiniLabel, { color: theme.textMuted }]}>
-              Dynamic Roll Centers (F / R)
-            </Text>
-            <Text style={[styles.kinematicMiniValue, { color: theme.accentPrimary }]}>
-              {activeSim.kinematics.effectiveFrontRollCenterMm.toFixed(0)}mm F /{' '}
-              {activeSim.kinematics.effectiveRearRollCenterMm.toFixed(0)}mm R
-            </Text>
-            <Text style={[styles.kinematicMiniSub, { color: theme.textMuted }]}>
-              Static: {activeSim.kinematics.staticFrontRollCenterMm.toFixed(0)} /{' '}
-              {activeSim.kinematics.staticRearRollCenterMm.toFixed(0)}mm
-            </Text>
-          </View>
-
-          <View style={[styles.kinematicMiniCard, { backgroundColor: theme.bgCard }]}>
-            <Text style={[styles.kinematicMiniLabel, { color: theme.textMuted }]}>
-              Roll Moment Arm (h_roll)
-            </Text>
-            <Text style={[styles.kinematicMiniValue, { color: theme.accentSecondary }]}>
-              {activeSim.kinematics.rollMomentArmMm.toFixed(0)} mm
-            </Text>
-            <Text style={[styles.kinematicMiniSub, { color: theme.textMuted }]}>
-              CG {activeSim.setup.cgHeightMm}mm → Roll Axis
-            </Text>
-          </View>
-
-          <View style={[styles.kinematicMiniCard, { backgroundColor: theme.bgCard }]}>
-            <Text style={[styles.kinematicMiniLabel, { color: theme.textMuted }]}>
-              Ride Frequencies (f_n)
-            </Text>
-            <Text style={[styles.kinematicMiniValue, { color: theme.textPrimary }]}>
-              {activeSim.kinematics.frontNaturalFreqHz.toFixed(2)}F /{' '}
-              {activeSim.kinematics.rearNaturalFreqHz.toFixed(2)}R Hz
-            </Text>
-            <Text style={[styles.kinematicMiniSub, { color: theme.textMuted }]}>
-              Tires: {activeSim.setup.frontTireWidthMm}/{activeSim.setup.rearTireWidthMm}mm (
-              {isSquareTireSetup ? 'Square' : 'Stagger'})
-            </Text>
-          </View>
-        </View>
-      </View>
     </View>
-  );
-};
+    <View style={[styles.phases, { borderColor: theme.borderSubtle }]}>
+      {phases.map((p, i) => <Pressable key={p.id} accessibilityRole="tab" aria-selected={active.driver.cornerPhase === p.id} accessibilityState={{ selected: active.driver.cornerPhase === p.id }}
+        accessibilityLabel={`${p.name} phase`} onPress={() => onSelectPhase(p.id)}
+        style={[styles.phase, veryNarrow && { paddingHorizontal: 4 }, { backgroundColor: active.driver.cornerPhase === p.id ? theme.bgElevated : 'transparent',
+          borderColor: active.driver.cornerPhase === p.id ? theme.border : 'transparent' }]}>
+        <Text style={[styles.phaseName, { color: active.driver.cornerPhase === p.id ? theme.textPrimary : theme.textMuted }]}>{`0${i + 1}  ${p.name}`}</Text>
+        <Text style={[styles.phaseValue, { color: balanceColor(p.score, theme) }]}>{scoreName(p.score)}</Text>
+      </Pressable>)}
+    </View>
+    <View style={styles.scenario}>
+      <Text style={[styles.scenarioValue, { color: theme.textSecondary }]}>{Math.round(kmhToMph(active.driver.speedKmh))} <Text style={{ color: theme.textMuted }}>mph</Text></Text>
+      <Text style={[styles.scenarioValue, { color: theme.textSecondary }]}>{active.driver.lateralG.toFixed(2)} <Text style={{ color: theme.textMuted }}>lateral G</Text></Text>
+      <Text style={[styles.assumed, { color: theme.textMuted }]}>ILLUSTRATIVE PROFILES</Text>
+    </View>
+    {previewSim && <View style={[styles.preview, { borderColor: theme.accentPrimary, backgroundColor: theme.bgElevated }]}>
+      <Text style={[styles.previewLabel, { color: theme.accentPrimary }]}>PREVIEW · NOT APPLIED</Text>
+      <Text style={{ color: theme.textPrimary, fontSize: 12, lineHeight: 18 }}>{previewTitle}</Text>
 
+    </View>}
+    <View style={[styles.figure, { maxHeight: maxFigureHeight }]} onLayout={event => setFigureWidth(Math.min(event.nativeEvent.layout.width, event.nativeEvent.layout.height * 700 / 600))}>
+      <Svg viewBox="0 0 700 600" width="100%" height="100%" accessibilityLabel="Overhead car with all four wheel force plots">
+        {[125, 281, 438].map(y => <Line key={y} x1={190} x2={510} y1={y} y2={y} stroke={theme.canvasGrid} strokeDasharray="3 7" />)}
+        <Line x1={350} y1={8} x2={350} y2={585} stroke={theme.canvasGrid} strokeDasharray="3 7" />
+        <SvgText fontFamily="sans-serif" x={350} y={16} textAnchor="middle" fill={theme.textMuted} fontSize={10} letterSpacing={3}>FRONT</SvgText>
+        <SvgImage href={require('../../../assets/custom-paint-top-down.png')} x={238} y={5} width={224} height={560} preserveAspectRatio="xMidYMid meet" />
+        {WHEELS.map(id => {
+          const w = active.wheels[id], r = reference?.wheels[id], p = POSITIONS[id];
+          const isLeft = id.endsWith('L');
+          const toeSign = isLeft ? 1 : -1;
+          const toeHeading = toeSign * w.staticToeAngleDeg / 2;
+          const steer = w.isFront ? turnSign * (w.isOutside ? geometricSteer.outsideSteerDeg : geometricSteer.insideSteerDeg) : 0;
+          const actualHeading = w.isFront ? turnSign * w.steerAngleDeg : toeHeading;
+          const color = usageColor(w, theme);
+          const tyreWidthPx = 32 * w.tireWidthMm / 255;
+          const maxForce = Math.max(0, w.maxTotalForceN);
+          const refMax = Math.max(0, r?.maxTotalForceN ?? 0);
+          const demand = Math.hypot(w.longitudinalFxN, w.lateralFyDemandN);
+          const refDemand = r ? Math.hypot(r.longitudinalFxN, r.lateralFyDemandN) : 0;
+          // One common force scale for this corner's current/reference capacities AND requests.
+          // The ring can shrink when demand exceeds capacity: no hidden vector clipping.
+          const scale = Math.max(1, maxForce, refMax, demand, refDemand) * 1.12;
+          const pxPerN = 55 / scale;
+          const radius = maxForce * pxPerN;
+          const dotX = p.plotX + turnSign * w.lateralFyDemandN * pxPerN;
+          const dotY = p.plotY - w.longitudinalFxN * pxPerN;
+          const labelX = isLeft ? 32 : 518;
+          const delta = r ? Math.round(newtonsToLbs(w.dynamicFzN - r.dynamicFzN)) : 0;
+          return <G key={id}>
+            <Line x1={isLeft ? 169 : 531} x2={isLeft ? p.x - 20 : p.x + 20} y1={p.plotY} y2={p.y}
+              stroke={selected === id ? theme.accentPrimary : theme.border} strokeWidth={1} strokeDasharray="3 4" />
+            {selected === id && <Rect x={labelX - 14} y={p.plotY - 101} width={180} height={233} rx={15}
+              fill={theme.accentPrimary} fillOpacity={0.035} stroke={theme.accentPrimary} strokeOpacity={0.4} />}
+            <SvgText fontFamily="sans-serif" x={labelX} y={p.plotY - 76} fill={theme.textPrimary} fontSize={19 * fontScale} fontWeight="700">{id}</SvgText>
+            <SvgText fontFamily="sans-serif" x={compact ? labelX : labelX + 38} y={p.plotY - (compact ? 55 : 78)} fill={theme.textMuted} fontSize={12 * fontScale} letterSpacing={0.8}>{w.isOutside ? 'OUTSIDE' : 'INSIDE'}</SvgText>
+            {!compact && <SvgText fontFamily="sans-serif" x={labelX} y={p.plotY - 57} fill={theme.textMuted} fontSize={11}>{w.tireWidthMm} mm tyre</SvgText>}
+            <Line x1={p.plotX - 56} x2={p.plotX + 56} y1={p.plotY} y2={p.plotY} stroke={theme.borderSubtle} />
+            <Line x1={p.plotX} x2={p.plotX} y1={p.plotY - 56} y2={p.plotY + 56} stroke={theme.borderSubtle} />
+            {r && refMax > 0 && <Circle cx={p.plotX} cy={p.plotY} r={refMax * pxPerN} fill="none" stroke={theme.textMuted} strokeWidth={1.3} strokeDasharray="3 4" />}
+            <Circle cx={p.plotX} cy={p.plotY} r={radius} fill={color} fillOpacity={0.07} stroke={color} strokeWidth={1.5} />
+            {r && <Circle cx={p.plotX + turnSign * r.lateralFyDemandN * pxPerN} cy={p.plotY - r.longitudinalFxN * pxPerN}
+              r={4} fill="none" stroke={theme.textMuted} strokeWidth={1.3} />}
+            <Line x1={p.plotX} y1={p.plotY} x2={dotX} y2={dotY} stroke={color} strokeWidth={2} />
+            <Circle cx={dotX} cy={dotY} r={4.5} fill={color} />
+            <SvgText fontFamily="sans-serif" x={labelX} y={p.plotY + 87} fill={color} fontSize={22 * fontScale} fontWeight="700">{w.dynamicFzN <= 0 ? 'Unloaded' : `${Math.round(w.gripUtilizationPct)}%${narrowFigure ? '' : ' used'}`}</SvgText>
+            <SvgText fontFamily="sans-serif" x={labelX} y={p.plotY + 112} fill={theme.textSecondary} fontSize={13 * fontScale}>{Math.round(newtonsToLbs(w.dynamicFzN))} lb{r && delta !== 0 && !narrowFigure ? `  (${delta > 0 ? '+' : ''}${delta})` : ''}</SvgText>
+            <TyreGlyph x={p.x} y={p.y} width={tyreWidthPx} steerDeg={steer}
+              actualHeadingDeg={actualHeading} toeDeg={toeHeading} camberDeg={w.dynamicCamberDeg}
+              isLeft={isLeft} enhanced={enhancedTyres} selected={selected === id} color={color} />
+          </G>;
+        })}
+        {engineering && <G>
+          {[{ y: 165, width: frontBarWidth, color: theme.accentPrimary },
+            { y: 425, width: rearBarWidth, color: theme.accentSecondary }].map(bar => {
+            const d = `M 264 ${bar.y - 10} L 282 ${bar.y - 10} L 282 ${bar.y + 13} L 418 ${bar.y + 13} L 418 ${bar.y - 10} L 436 ${bar.y - 10}`;
+            return <G key={bar.y}>
+              <Rect x={266} y={bar.y - 25} width={168} height={58} rx={12} fill={theme.canvasBg} fillOpacity={0.94} stroke={bar.color} strokeOpacity={0.5} />
+              <Path d={d} fill="none" stroke={theme.canvasBg} strokeWidth={bar.width + 6} strokeLinejoin="round" />
+              <Path d={d} fill="none" stroke={bar.color} strokeWidth={bar.width} strokeLinejoin="round" strokeLinecap="round" />
+            </G>;
+          })}
+          <Rect x={316} y={cgY - 32} width={68} height={64} rx={12} fill={theme.canvasBg} fillOpacity={0.95} stroke={theme.warningColor} />
+          <Circle cx={350} cy={cgY} r={12} fill={theme.warningColor} stroke={theme.canvasBg} strokeWidth={3} />
+          <Line x1={335} x2={365} y1={cgY} y2={cgY} stroke={theme.canvasBg} strokeWidth={2} />
+          <Line x1={350} x2={350} y1={cgY - 15} y2={cgY + 15} stroke={theme.canvasBg} strokeWidth={2} />
+          <Line x1={350} y1={cgY} x2={350 + transferX * transferShrink} y2={cgY + transferY * transferShrink}
+            stroke={theme.canvasBg} strokeWidth={9} />
+          <Line x1={350} y1={cgY} x2={350 + transferX * transferShrink} y2={cgY + transferY * transferShrink}
+            stroke={theme.warningColor} strokeWidth={4} />
+          <Circle cx={350 + transferX * transferShrink} cy={cgY + transferY * transferShrink} r={5} fill={theme.warningColor} />
+        </G>}
+        <SvgText fontFamily="sans-serif" x={350} y={594} textAnchor="middle" fill={theme.textMuted} fontSize={10} letterSpacing={3}>REAR</SvgText>
+      </Svg>
+      {WHEELS.map(id => <Pressable key={id} accessibilityRole="button" accessibilityState={{ selected: selected === id }}
+        accessibilityLabel={`Inspect ${id} wheel, ${Math.round(newtonsToLbs(active.wheels[id].dynamicFzN))} pounds, ${active.wheels[id].dynamicFzN <= 0 ? 'unloaded' : `${Math.round(active.wheels[id].gripUtilizationPct)} percent used`}`}
+        onPress={() => onSelectWheel(id)} style={[styles.cornerTarget, { left: id.endsWith('L') ? '0%' : '50%', top: id.startsWith('F') ? '0%' : '50%' }]} />)}
+    </View>
+    <View style={[styles.legend, { borderColor: theme.borderSubtle }]}>
+      <Text style={[styles.legendText, { color: theme.textMuted }]}>Solid ring: grip limit · Dot: requested force{reference ? ` · Dashed: ${referenceLabel}` : ''}</Text>
+      <Text style={[styles.legendText, { color: theme.textMuted }]}>Per-corner force scale; schematic car. Percent: grip used. Up: drive · Down: brake · Lateral: into the turn.</Text>
+      <Text style={[styles.legendText, { color: theme.textMuted }]}>{enhancedTyres ? 'Tyres exaggerated: steering ×5, toe ×12; raised sidewalls indicate camber. Angles capped at 42° for display.' : 'Tyres: actual steering + toe angles; camber projection hidden.'} Telemetry stays at calculated values.</Text>
+      <View style={styles.viewSwitches}>
+        <Pressable accessibilityRole="switch" accessibilityLabel="Enhanced tyre view" aria-checked={enhancedTyres} accessibilityState={{ checked: enhancedTyres }} onPress={() => setEnhancedTyres(!enhancedTyres)} style={styles.viewSwitch}>
+          <Text style={[styles.link, { color: theme.accentPrimary }]}>{enhancedTyres ? '✓ ' : ''}Enhanced tyre view</Text>
+        </Pressable>
+        <Pressable accessibilityRole="switch" accessibilityLabel="Show engineering overlay" aria-checked={engineering} accessibilityState={{ checked: engineering }} onPress={() => setEngineering(!engineering)} style={styles.viewSwitch}>
+          <Text style={[styles.link, { color: theme.accentPrimary }]}>{engineering ? 'Hide' : 'Show'} engineering overlay</Text>
+        </Pressable>
+      </View>
+      {engineering && <View style={[styles.engineeringPanel, { backgroundColor: theme.bgElevated, borderColor: theme.border }]}>
+        <Text style={[styles.engineeringTitle, { color: theme.textPrimary }]}>ENGINEERING KEY</Text>
+        <Text style={[styles.engineeringText, { color: theme.warningColor }]}>⊕ CG · {Math.round(active.setup.frontWeightFraction * 100)}% front static weight</Text>
+        <Text style={[styles.legendText, { color: theme.textSecondary }]}>Gold line: schematic load-transfer direction; the CG itself stays fixed.</Text>
+        {[{ name: 'Front bar', value: active.setup.frontArbStiffnessNmPerDeg, color: theme.accentPrimary, width: frontBarWidth },
+          { name: 'Rear bar', value: active.setup.rearArbStiffnessNmPerDeg, color: theme.accentSecondary, width: rearBarWidth }].map(bar => <View style={styles.barKey} key={bar.name}>
+          <View style={{ width: 38, height: bar.width, borderRadius: 5, backgroundColor: bar.color }} />
+          <Text style={[styles.engineeringText, { color: theme.textPrimary }]}>{bar.name} · {Math.round(bar.value)} Nm/deg</Text>
+        </View>)}
+        <Text style={[styles.legendText, { color: theme.textMuted }]}>Thicker = stiffer on a shared scale. Bar shape and thickness are schematic.</Text>
+      </View>}
+    </View>
+    <View style={[styles.inspector, { borderColor: theme.borderSubtle }]}>
+      <View style={styles.inspectorHeading}>
+        <Text style={[styles.inspectorTitle, { color: theme.textPrimary }]}>{selected} <Text style={{ color: theme.textMuted, fontWeight: '400' }}> / {wheel.isOutside ? 'Outside' : 'Inside'} {wheel.isFront ? 'front' : 'rear'}</Text></Text>
+        <View style={styles.wheelButtons}>{WHEELS.map(id => <Pressable key={id} onPress={() => onSelectWheel(id)} accessibilityRole="button"
+          accessibilityLabel={`Inspect ${id}`} accessibilityState={{ selected: selected === id }}
+          style={[styles.wheelButton, { backgroundColor: selected === id ? theme.accentPrimary : theme.bgElevated }]}>
+          <Text style={{ color: selected === id ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textMuted, fontSize: 11, fontWeight: '700' }}>{id}</Text>
+        </Pressable>)}</View>
+      </View>
+      <View style={styles.metrics}>
+        {metric('Vertical load', `${Math.round(newtonsToLbs(wheel.dynamicFzN))} lb`, `Static ${Math.round(newtonsToLbs(wheel.staticFzN))} lb`)}
+        {metric('Grip demand', wheel.dynamicFzN <= 0 ? 'Unloaded' : `${wheel.gripUtilizationPct.toFixed(0)}%`, `${Math.round(wheel.maxTotalForceN)} N capacity`, usageColor(wheel, theme))}
+        {metric('Camber estimate', `${wheel.dynamicCamberDeg.toFixed(2)}°`, `${wheel.suspensionDeflectionMm.toFixed(1)} mm travel`)}
+        {metric('Steer / axle toe', `${wheel.steerAngleDeg.toFixed(2)}° / ${wheel.staticToeAngleDeg.toFixed(2)}°`, 'Actual steer magnitude / total toe')}
+        {metric('Slip estimate', wheel.gripUtilizationPct > 100 || wheel.dynamicFzN <= 0 ? 'Beyond limit' : `${wheel.slipAngleDeg.toFixed(1)}°`, `μ estimate ${wheel.effectiveFrictionMu.toFixed(2)}`)}
+      </View>
+      <Pressable accessibilityRole="button" aria-expanded={expanded} accessibilityState={{ expanded }} onPress={() => setExpanded(!expanded)}>
+        <Text style={[styles.link, { color: theme.accentPrimary }]}>{expanded ? 'Hide' : 'Show'} geometry & ride metrics</Text>
+      </Pressable>
+      {expanded && <View style={styles.metrics}>
+        {metric('Body roll / pitch', `${k.bodyRollDeg.toFixed(2)}° / ${k.bodyPitchDeg.toFixed(2)}°`, 'Quasi-static equilibrium')}
+        {metric('Ride frequency F / R', `${k.frontNaturalFreqHz.toFixed(2)} / ${k.rearNaturalFreqHz.toFixed(2)} Hz`, 'Single-mode approximation')}
+        {metric('Roll centre F / R', `${k.effectiveFrontRollCenterMm.toFixed(0)} / ${k.effectiveRearRollCenterMm.toFixed(0)} mm`, 'Illustrative geometry migration')}
+        {metric('Roll arm / front transfer', `${k.rollMomentArmMm.toFixed(0)} mm / ${(k.totalLateralLoadTransferDistributionFront * 100).toFixed(0)}%`, `Front roll stiffness ${(k.frontRollStiffnessRatio * 100).toFixed(0)}%`)}
+        {metric('Axle slip estimate F / R', `${k.frontAxleSlipAngleDeg.toFixed(1)}° / ${k.rearAxleSlipAngleDeg.toFixed(1)}°`, 'Illustrative handling proxy')}
+        {metric('Weight / front share', `${Math.round(newtonsToLbs(active.setup.massKg * 9.81))} lb / ${Math.round(active.setup.frontWeightFraction * 100)}%`, 'Illustrative vehicle profile')}
+        {metric('Slip-difference ratio', `${k.understeerGradientDegPerG.toFixed(2)}°/G`, 'Illustrative ratio, not a measured gradient')}
+        {metric('Aero downforce', `${Math.round(newtonsToLbs(k.totalAeroDownforceN))} lb`, 'Normal force; no added mass')}
+      </View>}
+      {refWheel && <Text style={[styles.modelNote, { color: theme.textMuted }]}>Comparison: {referenceLabel}, at the current speed, inputs, phase and surface.</Text>}
+    </View>
+  </View>;
+}
 const styles = StyleSheet.create({
-  container: {
-    borderRadius: 14,
-    borderWidth: 1,
-    overflow: 'hidden',
-    marginBottom: 12,
-  },
-  previewBanner: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    alignItems: 'center',
-  },
-  previewBannerText: {
-    color: '#0B0F17',
-    fontSize: 11,
-    fontWeight: '800',
-    letterSpacing: 0.3,
-  },
-  phaseRow: {
-    flexDirection: 'row',
-    padding: 8,
-    gap: 6,
-    borderBottomWidth: 1,
-  },
-  phaseTab: {
-    flex: 1,
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    borderRadius: 8,
-    borderWidth: 1.5,
-    alignItems: 'center',
-  },
-  phaseTabTitle: {
-    fontSize: 10,
-    fontWeight: '800',
-    letterSpacing: 0.4,
-    marginBottom: 2,
-  },
-  phaseScoreRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  phaseScoreValue: {
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  phaseDeltaBadge: {
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  balanceMeterContainer: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  balanceLabelsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 6,
-  },
-  balancePoleLabel: {
-    fontSize: 10,
-    fontWeight: '800',
-  },
-  turnTogglePill: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 12,
-    borderWidth: 1,
-  },
-  turnToggleText: {
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  meterTrack: {
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 1,
-    position: 'relative',
-    justifyContent: 'center',
-    marginBottom: 6,
-  },
-  meterCenterTick: {
-    position: 'absolute',
-    left: '50%',
-    width: 2,
-    height: 12,
-    marginLeft: -1,
-  },
-  meterGhostMarker: {
-    position: 'absolute',
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 2,
-    marginLeft: -6,
-  },
-  meterActiveThumb: {
-    position: 'absolute',
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    marginLeft: -7,
-  },
-  balanceSummaryRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 4,
-  },
-  balanceStatusText: {
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  slipComparisonText: {
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  cornerHudRow: {
-    flexDirection: 'row',
-    gap: 8,
-    paddingHorizontal: 10,
-    paddingTop: 10,
-    paddingBottom: 4,
-  },
-  cornerHudBottomRow: {
-    paddingTop: 4,
-    paddingBottom: 10,
-  },
-  cornerHudCard: {
-    flex: 1,
-    borderRadius: 10,
-    borderWidth: 1.2,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
-  },
-  cornerHudTopRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  cornerTitleGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-  cornerWheelId: {
-    fontSize: 13,
-    fontWeight: '900',
-  },
-  cornerInOutBadge: {
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  cornerUtilPill: {
-    paddingHorizontal: 7,
-    paddingVertical: 2,
-    borderRadius: 6,
-    borderWidth: 1,
-  },
-  cornerUtilText: {
-    fontSize: 10.5,
-    fontWeight: '800',
-  },
-  cornerMetricsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 4,
-  },
-  cornerMetricText: {
-    fontSize: 10.5,
-  },
-  svgWrapper: {
-    width: '100%',
-    position: 'relative',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  svgTouchOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    justifyContent: 'space-between',
-  },
-  svgTouchRow: {
-    flex: 1,
-    flexDirection: 'row',
-  },
-  svgTouchQuadrant: {
-    flex: 1,
-  },
-  inspectorCard: {
-    padding: 10,
-    borderTopWidth: 1,
-  },
-  inspectorHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  wheelSelectorPills: {
-    flexDirection: 'row',
-    gap: 4,
-  },
-  wheelPill: {
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: 6,
-    borderWidth: 1,
-  },
-  wheelPillText: {
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  inspectorTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  metricsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  metricCell: {
-    flex: 1,
-    minWidth: 75,
-    padding: 7,
-    borderRadius: 8,
-  },
-  metricLabel: {
-    fontSize: 9.5,
-    fontWeight: '600',
-    marginBottom: 2,
-  },
-  metricValue: {
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  metricSub: {
-    fontSize: 9.5,
-    marginTop: 1,
-  },
-  kinematicCardsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginTop: 8,
-    paddingTop: 8,
-    borderTopWidth: 1,
-  },
-  kinematicMiniCard: {
-    flex: 1,
-    minWidth: 100,
-    padding: 7,
-    borderRadius: 8,
-  },
-  kinematicMiniLabel: {
-    fontSize: 9,
-    fontWeight: '700',
-    marginBottom: 2,
-  },
-  kinematicMiniValue: {
-    fontSize: 11.5,
-    fontWeight: '800',
-  },
-  kinematicMiniSub: {
-    fontSize: 9,
-    marginTop: 1,
-  },
+  container: { borderRadius: 16, borderWidth: 1, overflow: 'hidden' },
+  viewSwitches: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 16 },
+  viewSwitch: { minHeight: 44, justifyContent: 'center' },
+  engineeringPanel: { borderWidth: 1, borderRadius: 10, padding: 14, gap: 9, marginTop: 4 },
+  engineeringTitle: { fontSize: 10, letterSpacing: 1.3, fontWeight: '700' },
+  engineeringText: { fontSize: 12, lineHeight: 18, fontWeight: '600' },
+  barKey: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 24 },
+  heading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 22, paddingBottom: 17 },
+  eyebrow: { fontSize: 9, fontWeight: '700', letterSpacing: 1.7, marginBottom: 8 },
+  title: { fontSize: 22, fontWeight: '600', letterSpacing: -0.5 },
+  toggle: { borderWidth: 1, paddingHorizontal: 13, paddingVertical: 10, borderRadius: 7 },
+  phases: { marginHorizontal: 20, padding: 4, borderWidth: 1, borderRadius: 10, flexDirection: 'row', gap: 4 },
+  phase: { flex: 1, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 7, borderWidth: 1 },
+  phaseName: { fontSize: 12, fontWeight: '600' }, phaseValue: { fontSize: 10, marginTop: 4 },
+  scenario: { flexDirection: 'row', gap: 20, alignItems: 'center', padding: 20, paddingBottom: 2, flexWrap: 'wrap' },
+  scenarioValue: { fontSize: 14, fontWeight: '600' }, assumed: { fontSize: 8, letterSpacing: 1.1, marginLeft: 'auto' },
+  preview: { margin: 20, marginBottom: 0, borderWidth: 1, borderRadius: 8, padding: 12 },
+  previewLabel: { fontSize: 9, fontWeight: '700', letterSpacing: 1, marginBottom: 5 },
+  figure: { maxHeight: 490, width: '100%', aspectRatio: 700 / 600 },
+  cornerTarget: { position: 'absolute', width: '50%', height: '50%', borderRadius: 10 },
+  legend: { paddingHorizontal: 22, paddingVertical: 14, borderTopWidth: 1, gap: 5 },
+  legendText: { fontSize: 10, lineHeight: 15 }, link: { fontSize: 11, fontWeight: '600', paddingVertical: 7 },
+  inspector: { padding: 20, borderTopWidth: 1 }, inspectorHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 },
+  inspectorTitle: { fontSize: 14, fontWeight: '700' }, wheelButtons: { flexDirection: 'row', gap: 4 },
+  wheelButton: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 10, paddingVertical: 7, borderRadius: 5 },
+  metrics: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 18, gap: 16 },
+  metric: { flexBasis: '43%', flexGrow: 1, minWidth: 110, marginBottom: 8 }, metricLabel: { fontSize: 10, marginBottom: 7 },
+  metricValue: { fontSize: 19, fontWeight: '600', fontVariant: ['tabular-nums'] }, metricDetail: { fontSize: 10, lineHeight: 15, marginTop: 4 },
+  modelNote: { fontSize: 10, lineHeight: 16, marginTop: 14 },
 });

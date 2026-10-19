@@ -2,8 +2,9 @@ import { DRIVETRAIN_ARCHETYPES } from './archetypes';
 import {
   calculateAckermannSteerAngles,
   calculateDynamicWheelCamber,
+  radToDeg,
 } from './kinematics';
-import { LoadTransferSolution, solveLoadTransfer } from './loadTransfer';
+import { LoadTransferSolution, phaseAccelerations, solveLoadTransfer } from './loadTransfer';
 import {
   CornerPhase,
   DriverInputState,
@@ -32,22 +33,14 @@ export function evaluatePhaseMechanics(
   const loadSol = solveLoadTransfer(setup, driver, phase);
   const isLeftTurn = driver.turnDirection === 'left';
 
-  let netAxG = 0;
-  let effectiveAyG = driver.lateralG;
-  if (phase === 'entry') {
-    const trailFactor = 0.45 + 0.55 * (driver.trailBrakeOverlapPct / 100);
-    netAxG = -driver.brakingG * trailFactor;
-    effectiveAyG = driver.lateralG * 0.88;
-  } else if (phase === 'mid') {
-    netAxG = 0;
-    effectiveAyG = driver.lateralG;
-  } else {
-    netAxG = driver.throttleG;
-    effectiveAyG = driver.lateralG * 0.90;
-  }
-
-  const nominalSteerAngleDeg =
-    1.8 + effectiveAyG * 2.4 + (90 / Math.max(50, driver.speedKmh)) * 1.8;
+  const acceleration = phaseAccelerations(driver, phase);
+  const netAxG = acceleration.longitudinalG;
+  const effectiveAyG = acceleration.lateralG;
+  // Geometric reference steer, not a solved driver steering/slip equilibrium.
+  const speedMs = driver.speedKmh / 3.6;
+  const nominalSteerAngleDeg = speedMs > 0
+    ? radToDeg(Math.atan((setup.wheelbaseMm / 1000) * GRAVITY * effectiveAyG / (speedMs * speedMs)))
+    : 0;
   const ackermann = calculateAckermannSteerAngles({
     nominalSteerAngleDeg,
     trackWidthMm: setup.frontTrackMm,
@@ -69,10 +62,32 @@ export function evaluatePhaseMechanics(
       ? totalLongitudinalForceN * (1 - frontBrakeFraction)
       : totalLongitudinalForceN * (1 - frontDriveFraction);
 
-  const frontLateralDemandN =
-    (loadSol.frontStaticAxleFzN + loadSol.frontAeroDownforceN) * effectiveAyG;
-  const rearLateralDemandN =
-    (loadSol.rearStaticAxleFzN + loadSol.rearAeroDownforceN) * effectiveAyG;
+  // Differential force allocation is an illustrative lock interpolation.
+  // Compute it before lateral demand so requested forces obey yaw balance.
+  const wheelFxDemandN = (id: WheelId): number => {
+    const isFront = id === 'FL' || id === 'FR';
+    const axleLoad = isFront
+      ? loadSol.wheelDynamicFzN.FL + loadSol.wheelDynamicFzN.FR
+      : loadSol.wheelDynamicFzN.RL + loadSol.wheelDynamicFzN.RR;
+    const loadShare = axleLoad > 0 ? loadSol.wheelDynamicFzN[id] / axleLoad : 0.5;
+    const axleFx = isFront ? frontAxleFxN : rearAxleFxN;
+    const lockFraction = Math.max(0, Math.min(1,
+      (axleFx < 0 ? setup.lsdDecelLockPct * 0.4 : setup.lsdAccelLockPct) / 100));
+    return axleFx * (0.5 * (1 - lockFraction) + loadShare * lockFraction);
+  };
+  const longitudinalDemands = {
+    FL: wheelFxDemandN('FL'), FR: wheelFxDemandN('FR'),
+    RL: wheelFxDemandN('RL'), RR: wheelFxDemandN('RR'),
+  };
+  const totalLateralDemandN = setup.massKg * GRAVITY * effectiveAyG;
+  // +y is right; yaw and lateral force share that sign.
+  const turnSign = isLeftTurn ? -1 : 1;
+  const longitudinalYawMomentNmm = setup.frontTrackMm / 2 *
+    (longitudinalDemands.FL - longitudinalDemands.FR) + setup.rearTrackMm / 2 *
+    (longitudinalDemands.RL - longitudinalDemands.RR);
+  const frontLateralDemandN = totalLateralDemandN * setup.frontWeightFraction -
+    longitudinalYawMomentNmm / (turnSign * setup.wheelbaseMm);
+  const rearLateralDemandN = totalLateralDemandN - frontLateralDemandN;
 
   const archPreset = DRIVETRAIN_ARCHETYPES[setup.drivetrain];
   const oemFrontWidth = archPreset?.oemFrontTireWidthMm ?? 245;
@@ -87,7 +102,7 @@ export function evaluatePhaseMechanics(
     const oemRefWidthMm = isFront ? oemFrontWidth : oemRearWidth;
 
     const staticFzN = loadSol.wheelStaticFzN[id];
-    const dynamicFzN = Math.max(50, loadSol.wheelDynamicFzN[id]);
+    const dynamicFzN = loadSol.wheelDynamicFzN[id];
     const deflectionMm = loadSol.wheelDeflectionMm[id];
 
     const steerAngleDeg = isFront
@@ -115,10 +130,8 @@ export function evaluatePhaseMechanics(
       kpiDeg: isFront ? setup.frontKpiDeg : 0,
     });
 
-    // 1. Tire Section Width & Load Sensitivity [Point 4: e.g. Porsche 944 Square Tire Upgrade]:
-    // Increasing tire section width W_tire enlarges contact patch area and increases the tire's
-    // effective nominal vertical load capacity F_z,nom, reducing contact stress (F_z / F_z,nom)
-    // and increasing cornering stiffness C_alpha and peak lateral force!
+    // 1. Illustrative width/load-sensitivity profile, not measured tyre data.
+    // Width scaling is not a universal contact-patch area law or load rating.
     const widthCapacityScale = Math.pow(
       Math.max(165, tireWidthMm) / Math.max(165, oemRefWidthMm),
       1.35
@@ -161,23 +174,11 @@ export function evaluatePhaseMechanics(
       ? loadSol.wheelDynamicFzN.FL + loadSol.wheelDynamicFzN.FR
       : loadSol.wheelDynamicFzN.RL + loadSol.wheelDynamicFzN.RR;
     const wheelLoadShare = axleFz > 0 ? dynamicFzN / axleFz : 0.5;
-    const axleFx = isFront ? frontAxleFxN : rearAxleFxN;
+    const longitudinalFxN = longitudinalDemands[id];
 
-    let fxShare = wheelLoadShare;
-    if (axleFx < 0) {
-      const decelLock = setup.lsdDecelLockPct / 100;
-      fxShare = 0.5 * (1 - decelLock * 0.4) + wheelLoadShare * (decelLock * 0.4);
-    } else if (axleFx > 0) {
-      const accelLock = setup.lsdAccelLockPct / 100;
-      fxShare = 0.5 * (1 - accelLock) + wheelLoadShare * accelLock;
-    }
-
-    const longitudinalFxN = axleFx * fxShare;
-
-    // 6. Combined Slip Friction Ellipse
-    const fxRatio = Math.min(0.98, Math.abs(longitudinalFxN) / Math.max(1, maxTotalForceN));
-    const maxLateralFyAvailableN =
-      maxTotalForceN * Math.sqrt(Math.max(0.04, 1 - fxRatio * fxRatio));
+    // 6. No lateral reserve when requested Fx exceeds the simple circle.
+    const maxLateralFyAvailableN = Math.sqrt(Math.max(0,
+      maxTotalForceN * maxTotalForceN - longitudinalFxN * longitudinalFxN));
 
     const axleFyDemand = isFront ? frontLateralDemandN : rearLateralDemandN;
     const lateralFyDemandN = axleFyDemand * wheelLoadShare;
@@ -185,13 +186,17 @@ export function evaluatePhaseMechanics(
     const totalCombinedDemandN = Math.sqrt(
       longitudinalFxN * longitudinalFxN + lateralFyDemandN * lateralFyDemandN
     );
-    const gripUtilizationPct = Math.min(
-      150,
-      (totalCombinedDemandN / Math.max(1, maxTotalForceN)) * 100
-    );
+    // Undefined at zero capacity: finite placeholder only; Fz=0 is shown as
+    // Unloaded by the UI, never interpreted as zero utilization or spare grip.
+    const gripUtilizationPct = maxTotalForceN > 0
+      ? (totalCombinedDemandN / maxTotalForceN) * 100 : 0;
 
     // 7. Tire Slip Angle alpha (deg)
-    const lateralUtilization = lateralFyDemandN / Math.max(1, maxLateralFyAvailableN);
+    // Illustrative sub-limit curve only. Outside capacity there is no solved
+    // steady slip angle: keep its endpoint finite and issue a force warning.
+    const lateralUtilization = Math.max(-1, Math.min(1,
+      maxLateralFyAvailableN > 0 ? lateralFyDemandN / maxLateralFyAvailableN
+        : Math.sign(lateralFyDemandN)));
     const pressureStiffnessMod = 1 - Math.max(-0.08, Math.min(0.06, psiError * 0.012));
     const widthStiffnessMod = Math.pow(oemRefWidthMm / Math.max(165, tireWidthMm), 0.35);
     const slipAngleDeg =
@@ -234,8 +239,10 @@ export function evaluatePhaseMechanics(
   const rearAxleAvailFyN =
     wheels.RL.maxLateralFyAvailableN + wheels.RR.maxLateralFyAvailableN;
 
-  const frontAxleUtilization = frontLateralDemandN / Math.max(1, frontAxleAvailFyN);
-  const rearAxleUtilization = rearLateralDemandN / Math.max(1, rearAxleAvailFyN);
+  const frontAxleUtilization = Math.max(-1, Math.min(1,
+    frontAxleAvailFyN > 0 ? frontLateralDemandN / frontAxleAvailFyN : Math.sign(frontLateralDemandN)));
+  const rearAxleUtilization = Math.max(-1, Math.min(1,
+    rearAxleAvailFyN > 0 ? rearLateralDemandN / rearAxleAvailFyN : Math.sign(rearLateralDemandN)));
 
   const frontPsiErr = setup.frontTirePressurePsi - setup.optimalTirePressurePsi;
   const rearPsiErr = setup.rearTirePressurePsi - setup.optimalTirePressurePsi;
@@ -337,41 +344,48 @@ export function simulateVehicleState(
 
   const warnings: EngineeringWarning[] = [];
 
+  const requestedAcceleration = phaseAccelerations(driver, driver.cornerPhase);
+  if (driver.speedKmh === 0 && Math.abs(requestedAcceleration.lateralG) > 0) {
+    warnings.push({
+      id: 'stationary_force_request', severity: 'warning', title: 'Zero Speed with Requested Cornering',
+      explanation: 'These are prescribed force-only setup loads at zero aero speed, not a realizable stationary corner. Set the lateral-G request to zero for a stationary vehicle, or choose a positive corner speed.',
+    });
+  }
+
   if (loadSol.isFrontOverLowered || loadSol.isRearOverLowered) {
     warnings.push({
       id: 'over_lowered_rc',
       severity: 'warning',
-      title: 'Over-Lowering Geometry Trap Active',
-      explanation: `Ride height is dropped beyond the control-arm horizontal threshold. The dynamic roll center (${Math.round(
+      title: 'Illustrative Geometry Profile Outside Nominal Range',
+      explanation: `The generic profile predicts roll centres of ${Math.round(
         loadSol.effectiveFrontRollCenterMm
-      )}mm F / ${Math.round(
-        loadSol.effectiveRearRollCenterMm
-      )}mm R) migrated downward faster than the CG, increasing the roll moment arm (${Math.round(
-        loadSol.rollMomentArmMm
-      )}mm) and degrading negative camber recovery in bump. Consider raising ride height or installing extended roll-center correction ball joints.`,
+      )} mm front / ${Math.round(loadSol.effectiveRearRollCenterMm)} mm rear at this ride height. This is an assumed archetype curve, not a measured control-arm threshold. Verify the vehicle geometry before making a ride-height decision.`,
     });
   }
 
-  if (setup.frontAntiDivePct > 45 || setup.rearAntiSquatPct > 45) {
+  if (loadSol.wheelLiftRequested) {
     warnings.push({
-      id: 'excessive_anti_geometry',
-      severity: 'warning',
-      title: 'Excessive Longitudinal Anti-Geometry (>45%)',
-      explanation:
-        'High anti-dive or anti-squat routes braking/traction forces through rigid suspension links rather than springs. While pitch angle is reduced, vertical compliance over bumps drops and wheel-hop risk increases.',
+      id: 'wheel_lift', severity: 'critical', title: 'Wheel Unloading — Outside Four-Contact Model',
+      explanation: 'The requested acceleration would unload a wheel or axle. Zero-contact wheels have zero tyre capacity. Display loads preserve total vertical force, but this is not a solved three-contact or rollover state; reduce requested acceleration to return to the model range.',
+    });
+  }
+  if (!loadSol.rollEquilibriumValid) {
+    warnings.push({
+      id: 'roll_equilibrium', severity: 'critical', title: 'Roll Equilibrium Outside Model Range',
+      explanation: 'A stable small-angle roll solution did not converge within the model range. The displayed attitude is an intermediate estimate, not an equilibrium prediction.',
     });
   }
 
   const saturatedWheels = (Object.values(activeEval.wheels) as WheelTelemetry[]).filter(
-    (w) => w.gripUtilizationPct >= 100
+    (w) => Math.hypot(w.longitudinalFxN, w.lateralFyDemandN) > w.maxTotalForceN + 1e-6
   );
   if (saturatedWheels.length > 0) {
     const names = saturatedWheels.map((w) => w.id).join(', ');
     warnings.push({
       id: 'tire_saturation',
       severity: 'critical',
-      title: `Tire Friction Circle Saturated (${names})`,
-      explanation: `Combined longitudinal and lateral demand exceeds 100% of available contact patch grip on ${names}. Reduce lateral/longitudinal input, widen the saturated axle's tires, or shift load transfer away from the saturated axle.`,
+      title: `Requested Tyre Force Exceeds Capacity (${names})`,
+      explanation: `Requested combined force lies outside the assumed friction envelope on ${names}. The requested acceleration is not achievable in this model; slip values are illustrative curve endpoints, not solved steady angles. Reduce the requested inputs or compare an evidenced vehicle/tyre setup.`,
     });
   }
 

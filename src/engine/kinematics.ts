@@ -1,5 +1,5 @@
 import { SUSPENSION_GEOMETRY_PROFILES } from './archetypes';
-import { SuspensionGeometryType, VehicleSetup } from './types';
+import { RideFrequencyTargetSolution, SuspensionGeometryType, VehicleSetup } from './types';
 
 export interface Vec3 {
   x: number;
@@ -84,8 +84,9 @@ function normalizeVec3(v: Vec3): Vec3 {
 }
 
 /**
- * Parametric Arc-Sphere Kinematic Formulation with Weierstrass Algebraic Substitution
- * (PDF Pages 4–5: Dixon / McCleery analytical double-wishbone spatial link solver).
+ * Ideal rigid wishbone: its outboard ball joint follows a circular arc about
+ * the line through its two inboard pivots. Positive rotation is oriented to
+ * give an initially upward radial tangent when that direction is defined.
  */
 export function evaluateWishboneArc(
   pIn1: Vec3,
@@ -121,7 +122,7 @@ export function evaluateWishboneArc(
   return { axisUnit, center, radius, uBasis, vBasis, position };
 }
 
-export function solveDoubleWishboneArcSphere(params: {
+export interface DoubleWishboneArcSphereParameters {
   lowerIn1: Vec3;
   lowerIn2: Vec3;
   lowerOut0: Vec3;
@@ -129,79 +130,131 @@ export function solveDoubleWishboneArcSphere(params: {
   upperIn2: Vec3;
   upperOut0: Vec3;
   thetaLowerRad: number;
-}): {
+  /** Supply the preceding solved angle when following a travel sweep. */
+  previousThetaUpperRad?: number;
+}
+
+export interface DoubleWishboneArcSphereSolution {
+  status: 'solved';
+  solutionType: 'regular' | 'tangent' | 'underdetermined';
   lowerBallJoint: Vec3;
   upperBallJoint: Vec3;
   thetaUpperRad: number;
   camberChangeDeg: number;
-} {
+  /** Signed rigid-upright length residual, in the same length units as the inputs. */
+  closureResidual: number;
+}
+
+export type DoubleWishboneArcSphereResult = DoubleWishboneArcSphereSolution | {
+  status: 'invalid' | 'infeasible';
+  reason: string;
+};
+
+/**
+ * Circle/sphere intersection with explicit feasibility and closure checks.
+ * The phase form of A cos(theta) + B sin(theta) + C = 0 is equivalent to
+ * the half-angle quadratic, but also covers its linear case and theta = pi
+ * without dividing by a vanishing quadratic coefficient.
+ */
+export function trySolveDoubleWishboneArcSphere(
+  params: DoubleWishboneArcSphereParameters
+): DoubleWishboneArcSphereResult {
+  const points = [params.lowerIn1, params.lowerIn2, params.lowerOut0,
+    params.upperIn1, params.upperIn2, params.upperOut0];
+  const angles = [params.thetaLowerRad, params.previousThetaUpperRad ?? 0];
+  if (!points.every(p => [p.x, p.y, p.z].every(Number.isFinite)) ||
+      !angles.every(Number.isFinite)) {
+    return { status: 'invalid', reason: 'Coordinates and rotations must be finite.' };
+  }
+  if (normVec3(subVec3(params.lowerIn2, params.lowerIn1)) < 1e-9 ||
+      normVec3(subVec3(params.upperIn2, params.upperIn1)) < 1e-9) {
+    return { status: 'invalid', reason: 'Each wishbone needs a nonzero pivot axis.' };
+  }
   const kingpinLength = normVec3(subVec3(params.upperOut0, params.lowerOut0));
-  const lowerArc = evaluateWishboneArc(
-    params.lowerIn1,
-    params.lowerIn2,
-    params.lowerOut0,
-    params.thetaLowerRad
-  );
-  const upperArc0 = evaluateWishboneArc(params.upperIn1, params.upperIn2, params.upperOut0, 0);
+  if (kingpinLength < 1e-9) {
+    return { status: 'invalid', reason: 'The upright must have nonzero length.' };
+  }
+  const lowerArc = evaluateWishboneArc(params.lowerIn1, params.lowerIn2,
+    params.lowerOut0, params.thetaLowerRad);
+  const upperArc0 = evaluateWishboneArc(params.upperIn1, params.upperIn2,
+    params.upperOut0, 0);
+  if (lowerArc.radius < 1e-9 || upperArc0.radius < 1e-9) {
+    return { status: 'invalid', reason: 'A ball joint cannot lie on its wishbone pivot axis.' };
+  }
 
   const deltaC = subVec3(upperArc0.center, lowerArc.position);
   const Ru = upperArc0.radius;
-
   const A = 2 * Ru * dotVec3(upperArc0.uBasis, deltaC);
   const B = 2 * Ru * dotVec3(upperArc0.vBasis, deltaC);
   const C = dotVec3(deltaC, deltaC) + Ru * Ru - kingpinLength * kingpinLength;
+  const amplitude = Math.hypot(A, B);
+  if (![kingpinLength, lowerArc.radius, Ru, A, B, C, amplitude].every(Number.isFinite)) {
+    return { status: 'invalid', reason: 'Geometry exceeds the finite numerical range of the solver.' };
+  }
+  const scale = Math.max(1, Math.abs(A), Math.abs(B), Math.abs(C));
+  const tolerance = 1e-10 * scale;
+  const previous = params.previousThetaUpperRad ?? 0;
+  let solutionType: DoubleWishboneArcSphereSolution['solutionType'] = 'regular';
+  let thetaUpperRad: number;
 
-  const quadA = C - A;
-  const quadB = 2 * B;
-  const quadC = C + A;
-  const discriminant = Math.max(0, quadB * quadB - 4 * quadA * quadC);
-  const sqrtDisc = Math.sqrt(discriminant);
-
-  let thetaUpperRad = 0;
-  if (Math.abs(quadA) > 1e-9) {
-    const t1 = (-quadB + sqrtDisc) / (2 * quadA);
-    const t2 = (-quadB - sqrtDisc) / (2 * quadA);
-    const theta1 = 2 * Math.atan(t1);
-    const theta2 = 2 * Math.atan(t2);
-    thetaUpperRad = Math.abs(theta1) <= Math.abs(theta2) ? theta1 : theta2;
+  if (amplitude <= tolerance) {
+    if (Math.abs(C) > tolerance) {
+      return { status: 'infeasible', reason: 'The upper ball-joint arc does not intersect the upright sphere.' };
+    }
+    // Every upper-arm angle closes: preserve the supplied assembly state.
+    thetaUpperRad = previous;
+    solutionType = 'underdetermined';
+  } else {
+    if (Math.abs(C) > amplitude + tolerance) {
+      return { status: 'infeasible', reason: 'The requested lower-arm rotation has no rigid-upright solution.' };
+    }
+    const phase = Math.atan2(B, A);
+    const offset = Math.acos(Math.max(-1, Math.min(1, -C / amplitude)));
+    if (Math.abs(Math.abs(C) - amplitude) <= tolerance) solutionType = 'tangent';
+    const nearPrevious = (theta: number) =>
+      theta + 2 * Math.PI * Math.round((previous - theta) / (2 * Math.PI));
+    const candidates = [nearPrevious(phase + offset), nearPrevious(phase - offset)];
+    thetaUpperRad = Math.abs(candidates[0] - previous) <= Math.abs(candidates[1] - previous)
+      ? candidates[0] : candidates[1];
   }
 
-  const upperArcSolved = evaluateWishboneArc(
-    params.upperIn1,
-    params.upperIn2,
-    params.upperOut0,
-    thetaUpperRad
-  );
+  const upperArcSolved = evaluateWishboneArc(params.upperIn1, params.upperIn2,
+    params.upperOut0, thetaUpperRad);
+  const closureResidual = normVec3(subVec3(upperArcSolved.position, lowerArc.position)) - kingpinLength;
+  if (!Number.isFinite(closureResidual) || Math.abs(closureResidual) > Math.max(1e-7, kingpinLength * 1e-9)) {
+    return { status: 'infeasible', reason: 'The candidate solution failed the rigid-upright closure check.' };
+  }
+  const staticAngle = Math.atan2(params.upperOut0.y - params.lowerOut0.y,
+    params.upperOut0.z - params.lowerOut0.z);
+  const solvedAngle = Math.atan2(upperArcSolved.position.y - lowerArc.position.y,
+    upperArcSolved.position.z - lowerArc.position.z);
+  const angleChange = Math.atan2(Math.sin(solvedAngle - staticAngle), Math.cos(solvedAngle - staticAngle));
+  return { status: 'solved', solutionType, lowerBallJoint: lowerArc.position,
+    upperBallJoint: upperArcSolved.position, thetaUpperRad,
+    camberChangeDeg: radToDeg(angleChange), closureResidual };
+}
 
-  const staticDy = params.upperOut0.y - params.lowerOut0.y;
-  const staticDz = params.upperOut0.z - params.lowerOut0.z;
-  const staticAngle = Math.atan2(staticDy, staticDz);
-
-  const solvedDy = upperArcSolved.position.y - lowerArc.position.y;
-  const solvedDz = upperArcSolved.position.z - lowerArc.position.z;
-  const solvedAngle = Math.atan2(solvedDy, solvedDz);
-
-  const camberChangeDeg = radToDeg(solvedAngle - staticAngle);
-
-  return {
-    lowerBallJoint: lowerArc.position,
-    upperBallJoint: upperArcSolved.position,
-    thetaUpperRad,
-    camberChangeDeg,
-  };
+/** Compatibility wrapper: invalid or infeasible linkage states fail explicitly. */
+export function solveDoubleWishboneArcSphere(
+  params: DoubleWishboneArcSphereParameters
+): DoubleWishboneArcSphereSolution {
+  const result = trySolveDoubleWishboneArcSphere(params);
+  if (result.status !== 'solved') throw new RangeError(result.reason);
+  return result;
 }
 
 /**
- * Effective vertical stiffness at the tire contact patch (Wheel Rate K_w):
- * K_w = K_s * MR^2 * sin^2(theta_spring) [PDF Page 7]
+ * Local tangent wheel rate Kw = Ks * MR^2, for a constant measured axial
+ * spring-travel / wheel-travel ratio. The installation projection is already
+ * included in this MR. The legacy inclination argument is retained for callers
+ * and stored profiles; applying it again would count installation angle twice.
  */
 export function calculateWheelRateNmm(
   springRateNmm: number,
   motionRatio: number,
-  springInclinationDeg: number = 90
+  _legacySpringInclinationDeg: number = 90
 ): number {
-  const sinTheta = Math.sin(degToRad(springInclinationDeg));
-  return springRateNmm * motionRatio * motionRatio * (sinTheta * sinTheta);
+  return springRateNmm * motionRatio * motionRatio;
 }
 
 /**
@@ -244,43 +297,66 @@ export function calculateNaturalFrequencyHz(
   return (1 / (2 * Math.PI)) * Math.sqrt(kNm / cornerSprungMassKg);
 }
 
+export const MIN_SPRING_RATE_NMM = 25;
+export const MAX_SPRING_RATE_NMM = 320;
+/** Assumed sprung fraction for the educational archetypes, not measured data. */
+export const ASSUMED_SPRUNG_MASS_FRACTION = 0.88;
+
 /**
- * Inverse solver: Given a desired target Ride Frequency f_n (Hz), solves for the required
- * linear coil spring rate K_s (N/mm) accounting for tire vertical spring stiffness K_t,
- * motion ratio MR, and spring inclination angle theta_spring:
- * K_ride = (2 * pi * f_n)^2 * m_s / 1000
- * K_w = (K_ride * K_t) / (K_t - K_ride)
- * K_s = K_w / (MR^2 * sin^2(theta_spring))
+ * Invert the series tyre/suspension single-mode ride-frequency approximation.
+ * A bounded spring setting always reports its achieved frequency and limits;
+ * an impossible target never masquerades as an attained frequency.
  */
+export function solveRideFrequencyTarget(
+  targetFreqHz: number,
+  setup: VehicleSetup,
+  axle: 'front' | 'rear'
+): RideFrequencyTargetSolution {
+  const isFront = axle === 'front';
+  const cornerSprungMassKg = 0.5 * setup.massKg *
+    (isFront ? setup.frontWeightFraction : 1 - setup.frontWeightFraction) *
+    ASSUMED_SPRUNG_MASS_FRACTION;
+  const pressure = isFront ? setup.frontTirePressurePsi : setup.rearTirePressurePsi;
+  const width = isFront ? setup.frontTireWidthMm : setup.rearTireWidthMm;
+  const motionRatio = isFront ? setup.frontMotionRatio : setup.rearMotionRatio;
+  if (!Number.isFinite(targetFreqHz) || targetFreqHz <= 0 ||
+      !Number.isFinite(cornerSprungMassKg) || cornerSprungMassKg <= 0 ||
+      !Number.isFinite(motionRatio) || motionRatio <= 0 ||
+      !Number.isFinite(pressure) || !Number.isFinite(width) || width <= 0) {
+    throw new RangeError('Ride-frequency targets require positive frequency, mass, motion ratio and tyre width, with finite pressure.');
+  }
+  const kt = calculateTireVerticalRateNmm(pressure, width);
+  const frequencyAtRate = (springRate: number) => calculateNaturalFrequencyHz(
+    calculateRideRateNmm(calculateWheelRateNmm(springRate, motionRatio), pressure, width),
+    cornerSprungMassKg
+  );
+  const minAchievableFrequencyHz = frequencyAtRate(MIN_SPRING_RATE_NMM);
+  const maxAchievableFrequencyHz = frequencyAtRate(MAX_SPRING_RATE_NMM);
+  const targetRideRateNmm = Math.pow(2 * Math.PI * targetFreqHz, 2) * cornerSprungMassKg / 1000;
+  let springRateNmm: number;
+  let limitReason: RideFrequencyTargetSolution['limitReason'] = null;
+  if (targetFreqHz < minAchievableFrequencyHz) {
+    springRateNmm = MIN_SPRING_RATE_NMM;
+    limitReason = 'minimum_spring_rate';
+  } else if (targetFreqHz > maxAchievableFrequencyHz) {
+    springRateNmm = MAX_SPRING_RATE_NMM;
+    limitReason = targetRideRateNmm >= kt ? 'tire_stiffness_limit' : 'maximum_spring_rate';
+  } else {
+    const requiredWheelRateNmm = targetRideRateNmm * kt / (kt - targetRideRateNmm);
+    springRateNmm = requiredWheelRateNmm / (motionRatio * motionRatio);
+  }
+  return { requestedFrequencyHz: targetFreqHz, achievedFrequencyHz: frequencyAtRate(springRateNmm),
+    springRateNmm, minAchievableFrequencyHz, maxAchievableFrequencyHz,
+    status: limitReason ? 'limited' : 'achieved', limitReason };
+}
+
+/** Numeric compatibility API. Use solveRideFrequencyTarget to expose limits. */
 export function solveSpringRateForTargetRideFreqHz(
   targetFreqHz: number,
   setup: VehicleSetup,
   axle: 'front' | 'rear'
 ): number {
-  const isFront = axle === 'front';
-  const cornerSprungMassKg =
-    0.5 *
-    setup.massKg *
-    (isFront ? setup.frontWeightFraction : 1 - setup.frontWeightFraction) *
-    0.88;
-  const tirePressurePsi = isFront
-    ? setup.frontTirePressurePsi
-    : setup.rearTirePressurePsi;
-  const tireWidthMm = isFront ? setup.frontTireWidthMm : setup.rearTireWidthMm;
-  const motionRatio = isFront ? setup.frontMotionRatio : setup.rearMotionRatio;
-  const springInclinationDeg = isFront
-    ? setup.frontSpringInclinationDeg
-    : setup.rearSpringInclinationDeg;
-
-  const kt = calculateTireVerticalRateNmm(tirePressurePsi, tireWidthMm);
-  const omega = 2 * Math.PI * Math.max(0.8, Math.min(3.8, targetFreqHz));
-  const targetRideRateNmm = (omega * omega * cornerSprungMassKg) / 1000;
-  const clampedRideRate = Math.min(kt * 0.85, targetRideRateNmm);
-  const requiredWheelRateNmm =
-    (clampedRideRate * kt) / Math.max(10, kt - clampedRideRate);
-  const sinTheta = Math.sin(degToRad(springInclinationDeg));
-  const denom = Math.max(0.15, motionRatio * motionRatio * sinTheta * sinTheta);
-  return Math.round(Math.max(25, Math.min(320, requiredWheelRateNmm / denom)));
+  return solveRideFrequencyTarget(targetFreqHz, setup, axle).springRateNmm;
 }
 
 /**
@@ -347,6 +423,7 @@ export function calculateFrontRollStiffnessRatio(
 }
 
 /**
+ * Illustrative profile model, not a hardpoint kinematic solution.
  * Computes both Static and Dynamic Roll Center Heights (z_rc,f, z_rc,r) and Roll Moment Arm (h_roll)
  * including dynamic Roll Center Migration from:
  * 1. Static Ride Height changes (frontRideHeightDeltaMm, rearRideHeightDeltaMm)
@@ -433,7 +510,7 @@ export function calculateRollCenterKinematics(
   const rollAxisAtCgMm =
     bOverL * effectiveFrontRollCenterMm + aOverL * effectiveRearRollCenterMm;
 
-  const rollMomentArmMm = Math.max(40, effectiveCgHeightMm - rollAxisAtCgMm);
+  const rollMomentArmMm = effectiveCgHeightMm - rollAxisAtCgMm;
 
   return {
     effectiveCgHeightMm,
@@ -488,7 +565,8 @@ export function calculateAckermannSteerAngles(params: {
 }
 
 /**
- * Dynamic Camber Angle (gamma_dyn) [PDF Page 2].
+ * Illustrative camber profile. The per-type gains and lowering thresholds are
+ * assumptions, not a measured vehicle-specific kinematic solution.
  */
 export function calculateDynamicWheelCamber(params: {
   staticCamberDeg: number;

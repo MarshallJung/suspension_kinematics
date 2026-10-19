@@ -43,10 +43,10 @@ export interface RideFrequencyPreset {
 export const ALIGNMENT_PRESETS: Record<AlignmentPresetId, AlignmentPreset> = {
   oem_road: {
     id: 'oem_road',
-    name: 'OEM Road Default (Safe Understeer)',
-    shortLabel: 'OEM Road Default',
+    name: 'Illustrative Road Alignment',
+    shortLabel: 'Road alignment',
     description:
-      'Factory showroom alignment with mild negative camber (-0.9° F / -1.4° R) and front/rear toe-in (+0.12° F / +0.26° R) for highway stability, even street tire wear, and safe understeer at the limit.',
+      'Illustrative mild negative camber (-0.9° F / -1.4° R) and front/rear toe-in (+0.12° F / +0.26° R) as an assumed road-like profile; no manufacturer specification is implied.',
     frontStaticCamberDeg: -0.9,
     rearStaticCamberDeg: -1.4,
     frontStaticToeDeg: 0.12,
@@ -54,10 +54,10 @@ export const ALIGNMENT_PRESETS: Record<AlignmentPresetId, AlignmentPreset> = {
   },
   oem_track_max: {
     id: 'oem_track_max',
-    name: 'Maxed OEM Adjustment Window (HPDE)',
-    shortLabel: 'Maxed OEM Track',
+    name: 'Illustrative Track Alignment',
+    shortLabel: 'Track alignment',
     description:
-      'Maximizes negative camber within factory eccentric bolts / strut slots (-1.9° F / -2.0° R) with zero front toe (0.00°) and stabilizing rear toe-in (+0.24°).',
+      'Illustrative moderate negative camber profile (-1.9° F / -2.0° R) with zero front toe (0.00°) and stabilizing rear toe-in (+0.24°).',
     frontStaticCamberDeg: -1.9,
     rearStaticCamberDeg: -2.0,
     frontStaticToeDeg: 0.0,
@@ -65,8 +65,8 @@ export const ALIGNMENT_PRESETS: Record<AlignmentPresetId, AlignmentPreset> = {
   },
   dedicated_track: {
     id: 'dedicated_track',
-    name: 'Dedicated Track / Camber Plates & Shims',
-    shortLabel: 'Track Camber Plates',
+    name: 'Illustrative High-Camber Alignment',
+    shortLabel: 'High camber',
     description:
       'Aftermarket camber plates or LCA shims (-3.0° F / -2.5° R) with slight front toe-out (-0.08°) for crisp turn-in and +0.28° rear toe-in under heavy braking.',
     frontStaticCamberDeg: -3.0,
@@ -82,10 +82,10 @@ export const RIDE_FREQUENCY_PRESETS: Record<
 > = {
   oem_street: {
     id: 'oem_street',
-    name: 'OEM Street / Sport PASM (~1.5 Hz)',
-    shortLabel: 'OEM Street (1.5 Hz)',
+    name: 'Street-like Frequency Target',
+    shortLabel: 'Street (1.5 Hz)',
     description:
-      'Stock street sports car springs (1.45 Hz F / 1.60 Hz R). High mechanical compliance over bumps, larger body roll & pitch excursions.',
+      'Illustrative street-like targets (1.45 Hz F / 1.60 Hz R). High mechanical compliance over bumps, larger body roll & pitch excursions.',
     targetFrontHz: 1.45,
     targetRearHz: 1.60,
   },

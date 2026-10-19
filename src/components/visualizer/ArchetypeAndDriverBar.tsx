@@ -13,6 +13,7 @@ import {
   kmhToMph,
   mphToKmh,
   nmmToLbsPerIn,
+  solveRideFrequencyTarget,
 } from '../../engine';
 import { useTuningStore } from '../../store/useTuningStore';
 import { ThemePalette } from '../../theme/colors';
@@ -61,12 +62,14 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
     resetToArchetypeDefault,
   } = useTuningStore();
 
-  const [showCarSpecsDrawer, setShowCarSpecsDrawer] = useState(true);
-  const [showDriverSliders, setShowDriverSliders] = useState(true);
+  const [showCarSpecsDrawer, setShowCarSpecsDrawer] = useState(false);
+  const [showDriverSliders, setShowDriverSliders] = useState(false);
   const [showGeometryPicker, setShowGeometryPicker] = useState(false);
 
   const activeArchetype = DRIVETRAIN_ARCHETYPES[setup.drivetrain];
   const baseSetup = pinnedBaseline?.setup;
+  const frontFrequencyRange = solveRideFrequencyTarget(currentSim.kinematics.frontNaturalFreqHz, setup, 'front');
+  const rearFrequencyRange = solveRideFrequencyTarget(currentSim.kinematics.rearNaturalFreqHz, setup, 'rear');
   const baseDriver = pinnedBaseline?.driver;
 
   const isOemStagger =
@@ -86,11 +89,12 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
       >
         <View style={styles.topRow}>
           <Text style={[styles.sectionHeader, { color: theme.textSecondary }]}>
-            VEHICLE ARCHETYPE & SUSPENSION LINKAGE
+            VEHICLE PROFILE
           </Text>
           <View style={styles.topActionsGroup}>
-            <Pressable
+            <Pressable accessibilityRole="button"
               onPress={() => setShowCarSpecsDrawer((v) => !v)}
+              aria-expanded={showCarSpecsDrawer} accessibilityState={{ expanded: showCarSpecsDrawer }}
               style={[
                 styles.smallToggleBtn,
                 {
@@ -102,14 +106,15 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
               <Text
                 style={[
                   styles.smallToggleBtnText,
-                  { color: showCarSpecsDrawer ? '#0B0F17' : theme.accentPrimary },
+                  { color: showCarSpecsDrawer ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.accentPrimary },
                 ]}
               >
-                {showCarSpecsDrawer ? 'My Car Specs ▲' : 'My Car Specs ▼'}
+                {showCarSpecsDrawer ? 'Vehicle details ▲' : 'Vehicle details ▼'}
               </Text>
             </Pressable>
-            <Pressable
+            <Pressable accessibilityRole="button"
               onPress={() => setShowGeometryPicker((v) => !v)}
+              aria-expanded={showGeometryPicker} accessibilityState={{ expanded: showGeometryPicker }}
               style={[
                 styles.smallToggleBtn,
                 { backgroundColor: theme.bgElevated, borderColor: theme.border },
@@ -127,9 +132,11 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
             const preset = DRIVETRAIN_ARCHETYPES[archId];
             const isSelected = setup.drivetrain === archId;
             return (
-              <Pressable
+              <Pressable accessibilityRole="button"
                 key={archId}
                 onPress={() => selectArchetype(archId)}
+                accessibilityState={{ selected: isSelected }}
+                accessibilityLabel={preset.shortLabel}
                 style={[
                   styles.archPill,
                   {
@@ -141,10 +148,10 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                 <Text
                   style={[
                     styles.archPillText,
-                    { color: isSelected ? '#0B0F17' : theme.textPrimary },
+                    { color: isSelected ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textPrimary },
                   ]}
                 >
-                  {preset.shortLabel}
+                  {archId}
                 </Text>
               </Pressable>
             );
@@ -152,7 +159,8 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
         </View>
 
         <Text style={[styles.archExamplesText, { color: theme.textMuted }]}>
-          {activeArchetype.examples} — {activeArchetype.handlingCharacter}
+          {showCarSpecsDrawer ? `${activeArchetype.examples} · Illustrative inputs, not an OEM specification.` :
+            `${activeArchetype.name} · ${Math.round(setup.frontWeightFraction * 100)}/${Math.round((1 - setup.frontWeightFraction) * 100)} weight split`}
         </Text>
 
         {/* Optional Front / Rear Suspension Geometry Selector */}
@@ -171,9 +179,10 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                 const prof = SUSPENSION_GEOMETRY_PROFILES[gId];
                 const active = setup.frontGeometry === gId;
                 return (
-                  <Pressable
+                  <Pressable accessibilityRole="button"
                     key={`front-${gId}`}
                     onPress={() => setFrontGeometry(gId)}
+                    accessibilityState={{ selected: active }}
                     style={[
                       styles.geomPill,
                       {
@@ -185,7 +194,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                     <Text
                       style={[
                         styles.geomPillText,
-                        { color: active ? '#0B0F17' : theme.textSecondary },
+                        { color: active ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textSecondary },
                       ]}
                     >
                       {prof.shortName}
@@ -203,9 +212,10 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                 const prof = SUSPENSION_GEOMETRY_PROFILES[gId];
                 const active = setup.rearGeometry === gId;
                 return (
-                  <Pressable
+                  <Pressable accessibilityRole="button"
                     key={`rear-${gId}`}
                     onPress={() => setRearGeometry(gId)}
+                    accessibilityState={{ selected: active }}
                     style={[
                       styles.geomPill,
                       {
@@ -217,7 +227,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                     <Text
                       style={[
                         styles.geomPillText,
-                        { color: active ? '#0B0F17' : theme.textSecondary },
+                        { color: active ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textSecondary },
                       ]}
                     >
                       {prof.shortName}
@@ -241,7 +251,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
               1. EXISTING ALIGNMENT (CAMBER & TOE PRESETS OR CUSTOM)
             </Text>
             <Text style={[styles.subCaption, { color: theme.textMuted, marginBottom: 6 }]}>
-              Not sure of your exact numbers? Pick OEM Road Default (safe understeer) or Maxed OEM Track window:
+              Choose an illustrative alignment profile or enter measured values:
             </Text>
 
             <View style={styles.presetPillRow}>
@@ -253,9 +263,10 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                   Math.abs(setup.frontStaticToeDeg - p.frontStaticToeDeg) < 0.03 &&
                   Math.abs(setup.rearStaticToeDeg - p.rearStaticToeDeg) < 0.03;
                 return (
-                  <Pressable
+                  <Pressable accessibilityRole="button"
                     key={presetId}
                     onPress={() => applyAlignmentPreset(presetId)}
+                    accessibilityState={{ selected: isSelected }}
                     style={[
                       styles.geomPill,
                       {
@@ -267,7 +278,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                     <Text
                       style={[
                         styles.geomPillText,
-                        { color: isSelected ? '#0B0F17' : theme.textPrimary },
+                        { color: isSelected ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textPrimary },
                       ]}
                     >
                       {p.shortLabel} ({p.frontStaticCamberDeg}°F / {p.rearStaticCamberDeg}°R)
@@ -288,7 +299,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                 decimals={1}
                 unit="°"
                 leftHint="-4.2° (Track Plates)"
-                rightHint="-0.5° (OEM Street)"
+                rightHint="-0.5° (Mild Camber)"
                 onChange={(frontStaticCamberDeg) =>
                   updateSetup({ frontStaticCamberDeg })
                 }
@@ -304,7 +315,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                 decimals={1}
                 unit="°"
                 leftHint="-3.8° (Max Rear Grip)"
-                rightHint="-0.5° (OEM Street)"
+                rightHint="-0.5° (Mild Camber)"
                 onChange={(rearStaticCamberDeg) =>
                   updateSetup({ rearStaticCamberDeg })
                 }
@@ -350,11 +361,11 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                 2. TIRE WIDTH & SQUARE VS. STAGGERED SETUP (SAME COMPOUND)
               </Text>
               <Text style={[styles.subCaption, { color: theme.textMuted, marginBottom: 6 }]}>
-                Wider tires expand contact patch area and raise nominal load capacity (Fz,nom), reducing load-sensitivity saturation:
+                Tire size effects use an illustrative profile; validate changes against measured tire data:
               </Text>
 
               <View style={styles.presetPillRow}>
-                <Pressable
+                <Pressable accessibilityRole="button"
                   onPress={() => applyTireSetupPreset('oem_stagger')}
                   style={[
                     styles.geomPill,
@@ -367,15 +378,15 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                   <Text
                     style={[
                       styles.geomPillText,
-                      { color: isOemStagger ? '#0B0F17' : theme.textPrimary },
+                      { color: isOemStagger ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textPrimary },
                     ]}
                   >
-                    OEM Tire Sizing ({activeArchetype.oemFrontTireWidthMm}F /{' '}
+                    Baseline Tire Sizing ({activeArchetype.oemFrontTireWidthMm}F /{' '}
                     {activeArchetype.oemRearTireWidthMm}R mm)
                   </Text>
                 </Pressable>
 
-                <Pressable
+                <Pressable accessibilityRole="button"
                   onPress={() => applyTireSetupPreset('square_track')}
                   style={[
                     styles.geomPill,
@@ -397,7 +408,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                       {
                         color:
                           isSquareSetup && !isOemStagger
-                            ? '#0B0F17'
+                            ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A')
                             : theme.textPrimary,
                       },
                     ]}
@@ -432,7 +443,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                 step={10}
                 unit="mm"
                 leftHint="195mm (Narrower)"
-                rightHint="345mm (Steamroller Rear Grip)"
+                rightHint="345mm (Wider Rear Profile)"
                 onChange={(rearTireWidthMm) =>
                   updateSetup({ rearTireWidthMm })
                 }
@@ -457,9 +468,10 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                     Math.abs(currentSim.kinematics.frontNaturalFreqHz - rf.targetFrontHz) < 0.12 &&
                     Math.abs(currentSim.kinematics.rearNaturalFreqHz - rf.targetRearHz) < 0.12;
                   return (
-                    <Pressable
+                    <Pressable accessibilityRole="button"
                       key={rfId}
                       onPress={() => applyRideFrequencyPreset(rfId)}
+                      accessibilityState={{ selected: isActive }}
                       style={[
                         styles.geomPill,
                         {
@@ -471,7 +483,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                       <Text
                         style={[
                           styles.geomPillText,
-                          { color: isActive ? '#0B0F17' : theme.textPrimary },
+                          { color: isActive ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textPrimary },
                         ]}
                       >
                         {rf.shortLabel}
@@ -491,13 +503,14 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                     ? Number(pinnedBaseline.sim.kinematics.frontNaturalFreqHz.toFixed(2))
                     : undefined
                 }
-                min={1.2}
-                max={3.1}
+                min={frontFrequencyRange.minAchievableFrequencyHz}
+                max={frontFrequencyRange.maxAchievableFrequencyHz}
+                allowOutOfRangeInput
                 step={0.05}
                 decimals={2}
                 unit="Hz"
-                leftHint="1.20 Hz (Soft Street)"
-                rightHint="3.10 Hz (Stiff Race)"
+                leftHint={`${frontFrequencyRange.minAchievableFrequencyHz.toFixed(2)} Hz minimum`}
+                rightHint={`${frontFrequencyRange.maxAchievableFrequencyHz.toFixed(2)} Hz maximum`}
                 onChange={(targetHz) => setTargetRideFrequencyHz('front', targetHz)}
                 theme={theme}
               />
@@ -511,13 +524,14 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                     ? Number(pinnedBaseline.sim.kinematics.rearNaturalFreqHz.toFixed(2))
                     : undefined
                 }
-                min={1.2}
-                max={3.2}
+                min={rearFrequencyRange.minAchievableFrequencyHz}
+                max={rearFrequencyRange.maxAchievableFrequencyHz}
+                allowOutOfRangeInput
                 step={0.05}
                 decimals={2}
                 unit="Hz"
-                leftHint="1.20 Hz (Soft Street)"
-                rightHint="3.20 Hz (Stiff Race)"
+                leftHint={`${rearFrequencyRange.minAchievableFrequencyHz.toFixed(2)} Hz minimum`}
+                rightHint={`${rearFrequencyRange.maxAchievableFrequencyHz.toFixed(2)} Hz maximum`}
                 onChange={(targetHz) => setTargetRideFrequencyHz('rear', targetHz)}
                 theme={theme}
               />
@@ -556,46 +570,9 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
           </View>
         ) : null}
 
-        {/* Baseline Pin & Revert Toolbar */}
-        <View style={[styles.baselineToolbar, { borderTopColor: theme.borderSubtle }]}>
-          <Pressable
-            onPress={pinCurrentAsBaseline}
-            style={[
-              styles.baselineBtn,
-              { backgroundColor: theme.bgElevated, borderColor: theme.accentSecondary },
-            ]}
-          >
-            <Text style={[styles.baselineBtnText, { color: theme.accentSecondary }]}>
-              📌 Pin Current as Baseline
-            </Text>
-          </Pressable>
-
-          {pinnedBaseline ? (
-            <Pressable
-              onPress={revertToBaseline}
-              style={[
-                styles.baselineBtn,
-                { backgroundColor: theme.bgElevated, borderColor: theme.border },
-              ]}
-            >
-              <Text style={[styles.baselineBtnText, { color: theme.textPrimary }]}>
-                ↩ Revert to Baseline
-              </Text>
-            </Pressable>
-          ) : null}
-
-          <Pressable
-            onPress={resetToArchetypeDefault}
-            style={[
-              styles.baselineBtn,
-              { backgroundColor: theme.bgElevated, borderColor: theme.border },
-            ]}
-          >
-            <Text style={[styles.baselineBtnText, { color: theme.textSecondary }]}>
-              ↺ Factory Reset
-            </Text>
-          </Pressable>
-        </View>
+        <Pressable accessibilityRole="button" onPress={resetToArchetypeDefault} style={{ paddingTop: 10, alignSelf: 'flex-start' }}>
+          <Text style={{ color: theme.textMuted, fontSize: 10 }}>Reset profile defaults</Text>
+        </Pressable>
       </View>
 
       {/* Driver Input & Track Condition Controls (Instructor Coaching Panel) */}
@@ -605,16 +582,17 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
           { backgroundColor: theme.bgCard, borderColor: theme.border },
         ]}
       >
-        <Pressable
+        <Pressable accessibilityRole="button"
           onPress={() => setShowDriverSliders((v) => !v)}
+          aria-expanded={showDriverSliders} accessibilityState={{ expanded: showDriverSliders }}
           style={styles.topRow}
         >
-          <View>
+          <View style={{ flexShrink: 1, maxWidth: '100%' }}>
             <Text style={[styles.sectionHeader, { color: theme.accentSecondary }]}>
-              DRIVER INPUTS & TRACK CONDITION (INSTRUCTOR COACHING)
+              SCENARIO & DRIVER INPUTS
             </Text>
             <Text style={[styles.subCaption, { color: theme.textMuted }]}>
-              Demonstrate how trail-braking, throttle, and input smoothness shift tire loads
+              Adjust requested speed, acceleration and track surface
             </Text>
           </View>
           <Text style={[styles.smallToggleBtnText, { color: theme.accentPrimary }]}>
@@ -708,18 +686,19 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
 
             <ParameterSlider
               label="Cornering Speed (Aero Downforce ∝ v²)"
-              value={Math.round(kmhToMph(driver.speedKmh) / 5) * 5}
+              value={Number(kmhToMph(driver.speedKmh).toFixed(1))}
               baselineValue={
-                baseDriver ? Math.round(kmhToMph(baseDriver.speedKmh) / 5) * 5 : undefined
+                baseDriver ? Number(kmhToMph(baseDriver.speedKmh).toFixed(1)) : undefined
               }
-              min={35}
-              max={145}
+              min={0}
+              max={200}
               step={5}
               unit="mph"
-              leftHint="35 mph (Hairpin)"
-              rightHint="145 mph (Fast Sweeper)"
+              decimals={1}
+              leftHint="0 mph (No aero load)"
+              rightHint="200 mph (Fast Sweeper)"
               onChange={(speedMph) =>
-                updateDriver({ speedKmh: Math.round(mphToKmh(speedMph)) })
+                updateDriver({ speedKmh: mphToKmh(speedMph) })
               }
               theme={theme}
             />
@@ -738,9 +717,10 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
               ).map((surf) => {
                 const active = driver.surfaceCondition === surf.id;
                 return (
-                  <Pressable
+                  <Pressable accessibilityRole="button"
                     key={surf.id}
                     onPress={() => updateDriver({ surfaceCondition: surf.id })}
+                    accessibilityState={{ selected: active }}
                     style={[
                       styles.geomPill,
                       {
@@ -752,7 +732,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                     <Text
                       style={[
                         styles.geomPillText,
-                        { color: active ? '#0B0F17' : theme.textSecondary },
+                        { color: active ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textSecondary },
                       ]}
                     >
                       {surf.label}
@@ -791,18 +771,18 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   sectionHeader: {
-    fontSize: 10.5,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '600',
     letterSpacing: 0.5,
   },
   subSectionHeader: {
-    fontSize: 10.5,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '600',
     letterSpacing: 0.4,
     marginBottom: 2,
   },
   subCaption: {
-    fontSize: 10.5,
+    fontSize: 12,
     marginTop: 2,
   },
   smallToggleBtn: {
@@ -812,8 +792,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   smallToggleBtnText: {
-    fontSize: 10.5,
-    fontWeight: '800',
+    fontSize: 12,
+    fontWeight: '600',
   },
   archetypePillRow: {
     flexDirection: 'row',
@@ -828,11 +808,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   archPillText: {
-    fontSize: 11.5,
-    fontWeight: '800',
+    fontSize: 13,
+    fontWeight: '600',
   },
   archExamplesText: {
-    fontSize: 11,
+    fontSize: 12,
     lineHeight: 15,
   },
   geometrySection: {
@@ -861,7 +841,7 @@ const styles = StyleSheet.create({
     gap: 2,
   },
   geomLabel: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
     marginBottom: 4,
   },
@@ -877,7 +857,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   geomPillText: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
   },
   baselineToolbar: {
@@ -895,7 +875,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
   },
   baselineBtnText: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
   },
   driverControlsBody: {
