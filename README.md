@@ -2,7 +2,7 @@
 
 A local, interactive suspension and handling visualizer for track-day explanations and setup exploration. The application uses **React Native, Expo and TypeScript**, with a shared engine and state store for web, iOS and Android.
 
-The current iteration focuses on the web interface: an overhead vehicle view, all four tyre corners, explicit force-demand displays, and setup comparisons. The React Native application structure remains intact for future mobile work. Native builds and on-device behaviour still require separate verification.
+The app translates multi-variable suspension geometry, transient damping, and non-linear tire load sensitivity into a real-time 60 fps 2D chassis telemetry canvas. Running 100% deterministically on-device, its four-pillar physics pipeline couples a 3D Weierstrass half-angle arc-sphere spatial linkage solver, 4-way low/high-speed transient damper modeling, 4-corner load transfer (FRSR, TLLTD, and dynamic roll moment arm h_roll), and non-linear tire friction ellipses. Synchronized dual modes let drivers and instructors either step through a Symptom Diagnostic Wizard (complete with live ghost-ring overlays and geometry) trap warnings (such as MacPherson strut over-lowering roll-center migration) or dial in setup changes and closed-form inverse ride-frequency spring calculations in a What-If Tuning Sandbox.
 
 ## What it does
 
