@@ -115,6 +115,7 @@ export interface GeometryKinematicProfile {
   shortName: string;
   description: string;
   baseBumpCamberGainDegPerMm: number;
+  /** Parameterizes quadratic roll-center drop under body roll (not a multiplier on rigid-body roll camber). */
   rollCamberLossFactor: number;
   rcMigrationRatePerMmDrop: number;
   overLoweringThresholdMm: number;
@@ -130,7 +131,7 @@ export const SUSPENSION_GEOMETRY_PROFILES: Record<
     shortName: 'Strut',
     description:
       'Compact upright guided by a telescopic strut and lower control arm. Loses negative camber with body roll unless supported by static camber, caster, and roll stiffness; sensitive to over-lowering.',
-    baseBumpCamberGainDegPerMm: -0.014,
+    baseBumpCamberGainDegPerMm: -0.015,
     rollCamberLossFactor: 0.88,
     rcMigrationRatePerMmDrop: 2.1,
     overLoweringThresholdMm: -20,
@@ -141,7 +142,7 @@ export const SUSPENSION_GEOMETRY_PROFILES: Record<
     shortName: 'Double Wishbone',
     description:
       'Shorter, inward-inclined upper control arm and longer lower control arm. Generates strong negative camber recovery in bump (dγ/dz < 0) and controlled roll center migration.',
-    baseBumpCamberGainDegPerMm: -0.038,
+    baseBumpCamberGainDegPerMm: -0.052,
     rollCamberLossFactor: 0.52,
     rcMigrationRatePerMmDrop: 1.15,
     overLoweringThresholdMm: -32,
@@ -152,7 +153,7 @@ export const SUSPENSION_GEOMETRY_PROFILES: Record<
     shortName: 'Multi-Link',
     description:
       'Five spatial links create a virtual instant center with strong camber recovery in bump and passive toe-in stability under braking and cornering loads.',
-    baseBumpCamberGainDegPerMm: -0.031,
+    baseBumpCamberGainDegPerMm: -0.044,
     rollCamberLossFactor: 0.62,
     rcMigrationRatePerMmDrop: 1.35,
     overLoweringThresholdMm: -28,
@@ -484,7 +485,7 @@ export const DEFAULT_DRIVER_INPUT: DriverInputState = {
   lateralG: 1.05,
   brakingG: 0.45,
   throttleG: 0.40,
-  trailBrakeOverlapPct: 40,
+  trailBrakeOverlapPct: 25,
   driverSmoothnessPct: 75,
   surfaceCondition: 'smooth',
 };

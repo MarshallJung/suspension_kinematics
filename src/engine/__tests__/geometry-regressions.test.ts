@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   DRIVETRAIN_ARCHETYPES,
+  calculateAckermannSteerAngles,
+  calculateDynamicWheelCamber,
   calculateNaturalFrequencyHz,
   calculateRideRateNmm,
   calculateRollCenterKinematics,
+  calculateTubularArbRollStiffnessNmRad,
   calculateWheelRateNmm,
   degToRad,
   solveDoubleWishboneArcSphere,
@@ -140,5 +143,206 @@ describe('Geometry and ride-rate regression constraints', () => {
     const raised = calculateRollCenterKinematics({ ...setup,
       nominalFrontRollCenterMm: 470, nominalRearRollCenterMm: 470 });
     expect(raised.rollMomentArmMm).toBeCloseTo(-5, 10);
+  });
+
+  it('uses 1:1 rigid-body roll camber plus bump recovery without double-counting and captures negative steer & over-lowering', () => {
+    const out = calculateDynamicWheelCamber({
+      staticCamberDeg: -2.0,
+      geometry: 'double_wishbone',
+      rideHeightDeltaMm: 0,
+      wheelBumpDeflectionMm: 20,
+      bodyRollDeg: 2.0,
+      isOutsideWheel: true,
+      isFrontWheel: true,
+      steerAngleDeg: 0,
+      casterDeg: 8,
+      kpiDeg: 12,
+    });
+    expect(out.camberGainFromBumpDeg).toBeCloseTo(-0.052 * 20, 10);
+    // Rigid roll (+2.0) + bump recovery (-1.04) = +0.96 net camber loss (no rollCamberLossFactor multiplier)
+    expect(out.dynamicCamberDeg).toBeCloseTo(-2.0 + 2.0 - 0.052 * 20, 10);
+
+    const inn = calculateDynamicWheelCamber({
+      staticCamberDeg: -2.0,
+      geometry: 'double_wishbone',
+      rideHeightDeltaMm: 0,
+      wheelBumpDeflectionMm: -20,
+      bodyRollDeg: 2.0,
+      isOutsideWheel: false,
+      isFrontWheel: true,
+      steerAngleDeg: 0,
+      casterDeg: 8,
+      kpiDeg: 12,
+    });
+    expect(inn.dynamicCamberDeg).toBeCloseTo(-2.0 - 2.0 + 0.052 * 20, 10);
+
+    // Negative steerAngleDeg produces exact opposite caster term and positive KPI term
+    const negSteer = calculateDynamicWheelCamber({
+      staticCamberDeg: -2.0,
+      geometry: 'double_wishbone',
+      rideHeightDeltaMm: 0,
+      wheelBumpDeflectionMm: 0,
+      bodyRollDeg: 0,
+      isOutsideWheel: true,
+      isFrontWheel: true,
+      steerAngleDeg: -10,
+      casterDeg: 8,
+      kpiDeg: 12,
+    });
+    expect(negSteer.camberGainFromSteerDeg).toBeCloseTo(
+      -8 * Math.sin(degToRad(-10)) + 12 * (1 - Math.cos(degToRad(-10))),
+      10
+    );
+
+    // Over-lowering penalty reduces bump camber gain beyond each geometry's threshold
+    for (const [geom, overDrop] of [
+      ['macpherson', -25],
+      ['multilink', -33],
+      ['double_wishbone', -37],
+    ] as const) {
+      const nominal = calculateDynamicWheelCamber({
+        staticCamberDeg: -2.0,
+        geometry: geom,
+        rideHeightDeltaMm: 0,
+        wheelBumpDeflectionMm: 10,
+        bodyRollDeg: 0,
+        isOutsideWheel: true,
+        isFrontWheel: false,
+        steerAngleDeg: 0,
+        casterDeg: 0,
+        kpiDeg: 0,
+      });
+      const overLowered = calculateDynamicWheelCamber({
+        staticCamberDeg: -2.0,
+        geometry: geom,
+        rideHeightDeltaMm: overDrop,
+        wheelBumpDeflectionMm: 10,
+        bodyRollDeg: 0,
+        isOutsideWheel: true,
+        isFrontWheel: false,
+        steerAngleDeg: 0,
+        casterDeg: 0,
+        kpiDeg: 0,
+      });
+      expect(overLowered.camberGainFromBumpDeg).toBeGreaterThan(nominal.camberGainFromBumpDeg);
+    }
+  });
+
+  it('returns exact zero Ackermann steer at 0 deg and preserves signed toe symmetry', () => {
+    const straight = calculateAckermannSteerAngles({
+      nominalSteerAngleDeg: 0,
+      trackWidthMm: 1552,
+      wheelbaseMm: 2457,
+      ackermannPct: 65,
+      frontStaticToeDeg: 0,
+    });
+    expect(straight.outsideSteerDeg).toBe(0);
+    expect(straight.insideSteerDeg).toBe(0);
+
+    const toeOut = calculateAckermannSteerAngles({
+      nominalSteerAngleDeg: 0,
+      trackWidthMm: 1552,
+      wheelbaseMm: 2457,
+      ackermannPct: 65,
+      frontStaticToeDeg: -0.20,
+    });
+    expect(toeOut.outsideSteerDeg).toBeCloseTo(-0.10, 10);
+    expect(toeOut.insideSteerDeg).toBeCloseTo(0.10, 10);
+  });
+
+  it('keeps arc-sphere wishbone solver unit-invariant, mirrors left-side camber sign, and detects tangent solutions', () => {
+    const scalePoint = (p: { x: number; y: number; z: number }, s: number) => ({
+      x: p.x * s,
+      y: p.y * s,
+      z: p.z * s,
+    });
+    const ref = solveDoubleWishboneArcSphere({ ...linkage, thetaLowerRad: degToRad(6) });
+    for (const s of [1e-3, 1e-4]) {
+      const scaled = solveDoubleWishboneArcSphere({
+        lowerIn1: scalePoint(linkage.lowerIn1, s),
+        lowerIn2: scalePoint(linkage.lowerIn2, s),
+        lowerOut0: scalePoint(linkage.lowerOut0, s),
+        upperIn1: scalePoint(linkage.upperIn1, s),
+        upperIn2: scalePoint(linkage.upperIn2, s),
+        upperOut0: scalePoint(linkage.upperOut0, s),
+        thetaLowerRad: degToRad(6),
+      });
+      expect(scaled.solutionType).toBe('regular');
+      expect(scaled.thetaUpperRad).toBeCloseTo(ref.thetaUpperRad, 9);
+      expect(scaled.camberChangeDeg).toBeCloseTo(ref.camberChangeDeg, 8);
+    }
+
+    // Left-side wishbone (-y outboard) must also yield negative camber change in bump
+    const mirrorY = (p: { x: number; y: number; z: number }) => ({ x: p.x, y: -p.y, z: p.z });
+    const leftSolved = solveDoubleWishboneArcSphere({
+      lowerIn1: mirrorY(linkage.lowerIn1),
+      lowerIn2: mirrorY(linkage.lowerIn2),
+      lowerOut0: mirrorY(linkage.lowerOut0),
+      upperIn1: mirrorY(linkage.upperIn1),
+      upperIn2: mirrorY(linkage.upperIn2),
+      upperOut0: mirrorY(linkage.upperOut0),
+      thetaLowerRad: degToRad(6),
+    });
+    expect(leftSolved.camberChangeDeg).toBeCloseTo(ref.camberChangeDeg, 9);
+    expect(leftSolved.camberChangeDeg).toBeLessThan(0);
+
+    // Exact tangency: |deltaC| = Ru + kingpinLength (100 + 200 = 300)
+    const tangent = trySolveDoubleWishboneArcSphere({
+      lowerIn1: { x: 100, y: 0, z: 0 },
+      lowerIn2: { x: -100, y: 0, z: 0 },
+      lowerOut0: { x: 0, y: 100, z: 0 },
+      upperIn1: { x: 100, y: 0, z: 200 },
+      upperIn2: { x: -100, y: 0, z: 200 },
+      upperOut0: { x: 0, y: 100, z: 200 },
+      thetaLowerRad: -Math.PI / 2,
+      previousThetaUpperRad: -Math.PI / 2,
+    });
+    expect(tangent.status).toBe('solved');
+    if (tangent.status === 'solved') {
+      expect(tangent.solutionType).toBe('tangent');
+      expect(tangent.closureResidual).toBeCloseTo(0, 9);
+    }
+  });
+
+  it('rejects invalid tubular ARB diameters and separates tire vertical heave from suspension RC migration', () => {
+    expect(() =>
+      calculateTubularArbRollStiffnessNmRad({
+        outerDiameterMm: 24,
+        innerDiameterMm: 24,
+        effectiveLengthMm: 850,
+        armLengthMm: 180,
+        motionRatioArb: 0.9,
+        trackWidthMm: 1550,
+      })
+    ).toThrow(RangeError);
+    expect(() =>
+      calculateTubularArbRollStiffnessNmRad({
+        outerDiameterMm: 20,
+        innerDiameterMm: 24,
+        effectiveLengthMm: 850,
+        armLengthMm: 180,
+        motionRatioArb: 0.9,
+        trackWidthMm: 1550,
+      })
+    ).toThrow(RangeError);
+    expect(() =>
+      calculateTubularArbRollStiffnessNmRad({
+        outerDiameterMm: -24,
+        innerDiameterMm: 12,
+        effectiveLengthMm: 850,
+        armLengthMm: 180,
+        motionRatioArb: 0.9,
+        trackWidthMm: 1550,
+      })
+    ).toThrow(RangeError);
+
+    const setup = DRIVETRAIN_ARCHETYPES.RR.defaultSetup;
+    const baseRc = calculateRollCenterKinematics(setup, 0, 0, 0, 0, 0);
+    const tireSquashRc = calculateRollCenterKinematics(setup, 0, 0, 0, -10, -10);
+    expect(tireSquashRc.effectiveCgHeightMm).toBeCloseTo(baseRc.effectiveCgHeightMm - 10, 10);
+    expect(tireSquashRc.effectiveFrontRollCenterMm).toBeCloseTo(baseRc.effectiveFrontRollCenterMm - 10, 10);
+    expect(tireSquashRc.effectiveRearRollCenterMm).toBeCloseTo(baseRc.effectiveRearRollCenterMm - 10, 10);
+    expect(tireSquashRc.isFrontOverLowered).toBe(false);
+    expect(tireSquashRc.isRearOverLowered).toBe(false);
   });
 });

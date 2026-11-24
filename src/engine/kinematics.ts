@@ -155,6 +155,10 @@ export type DoubleWishboneArcSphereResult = DoubleWishboneArcSphereSolution | {
  * The phase form of A cos(theta) + B sin(theta) + C = 0 is equivalent to
  * the half-angle quadratic, but also covers its linear case and theta = pi
  * without dividing by a vanishing quadratic coefficient.
+ *
+ * `camberChangeDeg` reports the front-view kingpin-axis inclination change
+ * (negative when the upper ball joint leans inward relative to the lower
+ * ball joint); full 3D wheel-spindle orientation requires a tie-rod constraint.
  */
 export function trySolveDoubleWishboneArcSphere(
   params: DoubleWishboneArcSphereParameters
@@ -191,7 +195,13 @@ export function trySolveDoubleWishboneArcSphere(
   if (![kingpinLength, lowerArc.radius, Ru, A, B, C, amplitude].every(Number.isFinite)) {
     return { status: 'invalid', reason: 'Geometry exceeds the finite numerical range of the solver.' };
   }
-  const scale = Math.max(1, Math.abs(A), Math.abs(B), Math.abs(C));
+  const scale = Math.max(
+    kingpinLength * kingpinLength,
+    Ru * Ru,
+    Math.abs(A),
+    Math.abs(B),
+    Math.abs(C)
+  );
   const tolerance = 1e-10 * scale;
   const previous = params.previousThetaUpperRad ?? 0;
   let solutionType: DoubleWishboneArcSphereSolution['solutionType'] = 'regular';
@@ -221,13 +231,18 @@ export function trySolveDoubleWishboneArcSphere(
   const upperArcSolved = evaluateWishboneArc(params.upperIn1, params.upperIn2,
     params.upperOut0, thetaUpperRad);
   const closureResidual = normVec3(subVec3(upperArcSolved.position, lowerArc.position)) - kingpinLength;
-  if (!Number.isFinite(closureResidual) || Math.abs(closureResidual) > Math.max(1e-7, kingpinLength * 1e-9)) {
+  if (!Number.isFinite(closureResidual) || Math.abs(closureResidual) > Math.max(1e-12, kingpinLength * 1e-9)) {
     return { status: 'infeasible', reason: 'The candidate solution failed the rigid-upright closure check.' };
   }
-  const staticAngle = Math.atan2(params.upperOut0.y - params.lowerOut0.y,
-    params.upperOut0.z - params.lowerOut0.z);
-  const solvedAngle = Math.atan2(upperArcSolved.position.y - lowerArc.position.y,
-    upperArcSolved.position.z - lowerArc.position.z);
+  const sideSign = params.lowerOut0.y - lowerArc.center.y < 0 ? -1 : 1;
+  const staticAngle = Math.atan2(
+    sideSign * (params.upperOut0.y - params.lowerOut0.y),
+    params.upperOut0.z - params.lowerOut0.z
+  );
+  const solvedAngle = Math.atan2(
+    sideSign * (upperArcSolved.position.y - lowerArc.position.y),
+    upperArcSolved.position.z - lowerArc.position.z
+  );
   const angleChange = Math.atan2(Math.sin(solvedAngle - staticAngle), Math.cos(solvedAngle - staticAngle));
   return { status: 'solved', solutionType, lowerBallJoint: lowerArc.position,
     upperBallJoint: upperArcSolved.position, thetaUpperRad,
@@ -371,7 +386,32 @@ export function calculateTubularArbRollStiffnessNmRad(params: {
   trackWidthMm: number;
   shearModulusGpa?: number;
 }): number {
-  const G = (params.shearModulusGpa ?? 79.3) * 1e9;
+  const shearModulusGpa = params.shearModulusGpa ?? 79.3;
+  const numericInputs = [
+    params.outerDiameterMm,
+    params.innerDiameterMm,
+    params.effectiveLengthMm,
+    params.armLengthMm,
+    params.motionRatioArb,
+    params.trackWidthMm,
+    shearModulusGpa,
+  ];
+  if (
+    !numericInputs.every(Number.isFinite) ||
+    params.outerDiameterMm <= 0 ||
+    params.innerDiameterMm < 0 ||
+    params.innerDiameterMm >= params.outerDiameterMm ||
+    params.effectiveLengthMm <= 0 ||
+    params.armLengthMm <= 0 ||
+    params.motionRatioArb < 0 ||
+    params.trackWidthMm <= 0 ||
+    shearModulusGpa <= 0
+  ) {
+    throw new RangeError(
+      'Tubular ARB geometry requires finite positive dimensions with 0 <= innerDiameterMm < outerDiameterMm.'
+    );
+  }
+  const G = shearModulusGpa * 1e9;
   const Do = params.outerDiameterMm / 1000;
   const Di = params.innerDiameterMm / 1000;
   const L = Math.max(0.05, params.effectiveLengthMm / 1000);
@@ -388,10 +428,11 @@ export function calculateTubularArbRollStiffnessNmRad(params: {
 }
 
 /**
- * Single-axle roll stiffness K_phi,axle (N*m/rad) combining main springs and ARB in parallel.
+ * Single-axle suspension roll stiffness K_phi,suspension (N*m/rad) combining
+ * main springs (at wheel rate K_w) and ARB in parallel before series tire roll compliance.
  */
 export function calculateAxleRollStiffness(
-  rideRateNmm: number,
+  wheelRateNmm: number,
   trackWidthMm: number,
   arbStiffnessNmPerDeg: number
 ): {
@@ -399,9 +440,9 @@ export function calculateAxleRollStiffness(
   arbRollStiffnessNmRad: number;
   totalAxleRollStiffnessNmRad: number;
 } {
-  const rideRateNm = rideRateNmm * 1000;
+  const wheelRateNm = wheelRateNmm * 1000;
   const trackM = trackWidthMm / 1000;
-  const springRollStiffnessNmRad = 0.5 * rideRateNm * trackM * trackM;
+  const springRollStiffnessNmRad = 0.5 * wheelRateNm * trackM * trackM;
   const arbRollStiffnessNmRad = arbStiffnessNmPerDeg * RAD_TO_DEG;
   return {
     springRollStiffnessNmRad,
@@ -427,14 +468,18 @@ export function calculateFrontRollStiffnessRatio(
  * Computes both Static and Dynamic Roll Center Heights (z_rc,f, z_rc,r) and Roll Moment Arm (h_roll)
  * including dynamic Roll Center Migration from:
  * 1. Static Ride Height changes (frontRideHeightDeltaMm, rearRideHeightDeltaMm)
- * 2. Dynamic Braking Dive / Acceleration Squat axle heave (dynamicFrontHeaveMm, dynamicRearHeaveMm)
+ * 2. Dynamic Braking Dive / Acceleration Squat suspension heave (dynamicFrontHeaveMm, dynamicRearHeaveMm)
  * 3. Dynamic Chassis Roll Angle (bodyRollDeg)
+ * 4. Optional dynamic tire vertical heave (dynamicFrontTireHeaveMm, dynamicRearTireHeaveMm), which
+ *    translates CG and RC 1:1 toward the ground without articulating suspension links.
  */
 export function calculateRollCenterKinematics(
   setup: VehicleSetup,
-  dynamicFrontHeaveMm: number = 0, // negative = compression in dive
-  dynamicRearHeaveMm: number = 0, // negative = compression in squat
-  bodyRollDeg: number = 0
+  dynamicFrontHeaveMm: number = 0, // negative = suspension compression in dive
+  dynamicRearHeaveMm: number = 0, // negative = suspension compression in squat
+  bodyRollDeg: number = 0,
+  dynamicFrontTireHeaveMm: number = 0, // negative = tire vertical compression
+  dynamicRearTireHeaveMm: number = 0 // negative = tire vertical compression
 ): {
   effectiveCgHeightMm: number;
   staticFrontRollCenterMm: number;
@@ -449,12 +494,14 @@ export function calculateRollCenterKinematics(
   const frontProfile = SUSPENSION_GEOMETRY_PROFILES[setup.frontGeometry];
   const rearProfile = SUSPENSION_GEOMETRY_PROFILES[setup.rearGeometry];
 
-  const totalFrontDeltaMm = setup.frontRideHeightDeltaMm + dynamicFrontHeaveMm;
-  const totalRearDeltaMm = setup.rearRideHeightDeltaMm + dynamicRearHeaveMm;
+  const totalFrontSuspDeltaMm = setup.frontRideHeightDeltaMm + dynamicFrontHeaveMm;
+  const totalRearSuspDeltaMm = setup.rearRideHeightDeltaMm + dynamicRearHeaveMm;
+  const totalFrontBodyDeltaMm = totalFrontSuspDeltaMm + dynamicFrontTireHeaveMm;
+  const totalRearBodyDeltaMm = totalRearSuspDeltaMm + dynamicRearTireHeaveMm;
 
   const avgRideDeltaMm =
-    setup.frontWeightFraction * totalFrontDeltaMm +
-    (1 - setup.frontWeightFraction) * totalRearDeltaMm;
+    setup.frontWeightFraction * totalFrontBodyDeltaMm +
+    (1 - setup.frontWeightFraction) * totalRearBodyDeltaMm;
   const effectiveCgHeightMm = setup.cgHeightMm + avgRideDeltaMm;
 
   // Static roll centers (at current ride height setting before dynamic cornering pitch/roll)
@@ -477,14 +524,14 @@ export function calculateRollCenterKinematics(
     setup.rearRideHeightDeltaMm * rearProfile.rcMigrationRatePerMmDrop +
     staticRearOverLower * 1.1;
 
-  // Dynamic roll centers (migrating with live pitch dive/squat and body roll angle phi)
+  // Dynamic roll centers (suspension linkage migration + 1:1 tire deflection toward ground)
   const dynFrontOverLower = Math.min(
     0,
-    totalFrontDeltaMm - frontProfile.overLoweringThresholdMm
+    totalFrontSuspDeltaMm - frontProfile.overLoweringThresholdMm
   );
   const dynRearOverLower = Math.min(
     0,
-    totalRearDeltaMm - rearProfile.overLoweringThresholdMm
+    totalRearSuspDeltaMm - rearProfile.overLoweringThresholdMm
   );
 
   // Body roll causes vertical roll center migration proportional to rollCamberLossFactor * phi^2
@@ -495,15 +542,17 @@ export function calculateRollCenterKinematics(
 
   const effectiveFrontRollCenterMm =
     setup.nominalFrontRollCenterMm +
-    totalFrontDeltaMm * frontProfile.rcMigrationRatePerMmDrop +
+    totalFrontSuspDeltaMm * frontProfile.rcMigrationRatePerMmDrop +
     dynFrontOverLower * 1.35 +
-    frontRollMigrationMm;
+    frontRollMigrationMm +
+    dynamicFrontTireHeaveMm;
 
   const effectiveRearRollCenterMm =
     setup.nominalRearRollCenterMm +
-    totalRearDeltaMm * rearProfile.rcMigrationRatePerMmDrop +
+    totalRearSuspDeltaMm * rearProfile.rcMigrationRatePerMmDrop +
     dynRearOverLower * 1.1 +
-    rearRollMigrationMm;
+    rearRollMigrationMm +
+    dynamicRearTireHeaveMm;
 
   const bOverL = setup.frontWeightFraction;
   const aOverL = 1 - setup.frontWeightFraction;
@@ -520,8 +569,8 @@ export function calculateRollCenterKinematics(
     effectiveRearRollCenterMm,
     rollAxisAtCgMm,
     rollMomentArmMm,
-    isFrontOverLowered: totalFrontDeltaMm < frontProfile.overLoweringThresholdMm,
-    isRearOverLowered: totalRearDeltaMm < rearProfile.overLoweringThresholdMm,
+    isFrontOverLowered: totalFrontSuspDeltaMm < frontProfile.overLoweringThresholdMm,
+    isRearOverLowered: totalRearSuspDeltaMm < rearProfile.overLoweringThresholdMm,
   };
 }
 
@@ -538,29 +587,27 @@ export function calculateAckermannSteerAngles(params: {
   outsideSteerDeg: number;
   insideSteerDeg: number;
 } {
-  const baseRad = degToRad(Math.max(0.1, Math.abs(params.nominalSteerAngleDeg)));
-  const wOverL = params.trackWidthMm / Math.max(1000, params.wheelbaseMm);
+  const absNominalDeg = Math.abs(params.nominalSteerAngleDeg);
+  const baseRad = degToRad(Math.min(85, absNominalDeg));
+  const tanBase = Math.tan(baseRad);
+  const halfWOverL = 0.5 * (params.trackWidthMm / Math.max(1000, params.wheelbaseMm));
 
-  const cotCenter = 1 / Math.tan(baseRad);
-  const cotOuterAck = cotCenter + 0.5 * wOverL;
-  const cotInnerAck = Math.max(0.1, cotCenter - 0.5 * wOverL);
-
-  const outerAckDeg = radToDeg(Math.atan(1 / cotOuterAck));
-  const innerAckDeg = radToDeg(Math.atan(1 / cotInnerAck));
+  const outerAckDeg = radToDeg(Math.atan2(tanBase, 1 + halfWOverL * tanBase));
+  const innerAckDeg = radToDeg(
+    Math.atan2(tanBase, Math.max(1e-6, 1 - halfWOverL * tanBase))
+  );
 
   const ackFactor = params.ackermannPct / 100;
-  const parallelDeg = Math.abs(params.nominalSteerAngleDeg);
-
   const halfToeDeg = params.frontStaticToeDeg * 0.5;
 
   const outsideSteerDeg =
-    parallelDeg + ackFactor * (outerAckDeg - parallelDeg) + halfToeDeg;
+    absNominalDeg + ackFactor * (outerAckDeg - absNominalDeg) + halfToeDeg;
   const insideSteerDeg =
-    parallelDeg + ackFactor * (innerAckDeg - parallelDeg) - halfToeDeg;
+    absNominalDeg + ackFactor * (innerAckDeg - absNominalDeg) - halfToeDeg;
 
   return {
-    outsideSteerDeg: Math.max(0, outsideSteerDeg),
-    insideSteerDeg: Math.max(0, insideSteerDeg),
+    outsideSteerDeg,
+    insideSteerDeg,
   };
 }
 
@@ -594,11 +641,13 @@ export function calculateDynamicWheelCamber(params: {
   const effectiveBumpGainRate = profile.baseBumpCamberGainDegPerMm + overLowerPenalty;
   const camberGainFromBumpDeg = effectiveBumpGainRate * params.wheelBumpDeflectionMm;
 
+  // Rigid-body chassis roll leans the wheel 1:1 relative to ground; suspension
+  // bump camber gain (from wheelBumpDeflectionMm) already provides camber recovery.
   const rollSign = params.isOutsideWheel ? 1 : -1;
-  const rollCamberEffectDeg = rollSign * params.bodyRollDeg * profile.rollCamberLossFactor;
+  const rollCamberEffectDeg = rollSign * params.bodyRollDeg;
 
   let camberGainFromSteerDeg = 0;
-  if (params.isFrontWheel && params.steerAngleDeg > 0.01) {
+  if (params.isFrontWheel && Math.abs(params.steerAngleDeg) > 1e-6) {
     const deltaRad = degToRad(params.steerAngleDeg);
     const casterTerm = -params.casterDeg * Math.sin(deltaRad);
     const kpiTerm = params.kpiDeg * (1 - Math.cos(deltaRad));
@@ -636,16 +685,30 @@ export function calculateAntiDivePercentage(params: {
   );
 }
 
+/**
+ * Rear anti-squat percentage with ground-referenced `rearSvicHeightMm`.
+ * For independent rear suspensions (chassis-mounted diff, default `irs`), tractive
+ * force reacts at wheel center height (`loadedWheelRadiusMm`, default 330 mm), so
+ * %AS = ((Z_SVIC - r_w) / X_SVIC) * (L / h_CG) * (1 - frontTorqueSplit) * 100.
+ * For `solid_axle`, reaction passes through the contact patch (r_w = 0).
+ */
 export function calculateAntiSquatPercentage(params: {
   rearSvicHeightMm: number;
   rearSvicLengthMm: number;
   wheelbaseMm: number;
   cgHeightMm: number;
   frontTorqueSplitFraction: number;
+  architecture?: 'irs' | 'solid_axle';
+  loadedWheelRadiusMm?: number;
 }): number {
   if (params.rearSvicLengthMm <= 0 || params.cgHeightMm <= 0) return 0;
+  const architecture = params.architecture ?? 'irs';
+  const effectiveHeightMm =
+    architecture === 'irs'
+      ? params.rearSvicHeightMm - (params.loadedWheelRadiusMm ?? 330)
+      : params.rearSvicHeightMm;
   return (
-    (params.rearSvicHeightMm / params.rearSvicLengthMm) *
+    (effectiveHeightMm / params.rearSvicLengthMm) *
     (params.wheelbaseMm / params.cgHeightMm) *
     (1 - params.frontTorqueSplitFraction) *
     100

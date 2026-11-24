@@ -48,6 +48,14 @@ export function evaluatePhaseMechanics(
     ackermannPct: setup.ackermannPct,
     frontStaticToeDeg: setup.frontStaticToeDeg,
   });
+  const geometricAckermann = calculateAckermannSteerAngles({
+    nominalSteerAngleDeg,
+    trackWidthMm: setup.frontTrackMm,
+    wheelbaseMm: setup.wheelbaseMm,
+    ackermannPct: setup.ackermannPct,
+    frontStaticToeDeg: 0,
+  });
+  const lateralBlend = Math.min(1, Math.abs(effectiveAyG) / 0.35);
 
   const totalLongitudinalForceN = setup.massKg * GRAVITY * netAxG;
   const frontBrakeFraction = setup.brakeBiasFrontPct / 100;
@@ -69,10 +77,16 @@ export function evaluatePhaseMechanics(
     const axleLoad = isFront
       ? loadSol.wheelDynamicFzN.FL + loadSol.wheelDynamicFzN.FR
       : loadSol.wheelDynamicFzN.RL + loadSol.wheelDynamicFzN.RR;
-    const loadShare = axleLoad > 0 ? loadSol.wheelDynamicFzN[id] / axleLoad : 0.5;
+    if (axleLoad <= 0) return 0;
+    const wheelFz = loadSol.wheelDynamicFzN[id];
+    if (wheelFz <= 0) return 0;
+    const loadShare = wheelFz / axleLoad;
     const axleFx = isFront ? frontAxleFxN : rearAxleFxN;
-    const lockFraction = Math.max(0, Math.min(1,
-      (axleFx < 0 ? setup.lsdDecelLockPct * 0.4 : setup.lsdAccelLockPct) / 100));
+    if (loadShare >= 1 - 1e-12) return axleFx;
+    const axleHasDiff = isFront ? frontDriveFraction > 0 : frontDriveFraction < 1;
+    const lockFraction = axleHasDiff
+      ? Math.max(0, Math.min(1, (axleFx < 0 ? setup.lsdDecelLockPct * 0.4 : setup.lsdAccelLockPct) / 100))
+      : 0;
     return axleFx * (0.5 * (1 - lockFraction) + loadShare * lockFraction);
   };
   const longitudinalDemands = {
@@ -110,12 +124,17 @@ export function evaluatePhaseMechanics(
         ? ackermann.outsideSteerDeg
         : ackermann.insideSteerDeg
       : 0;
+    const geometricSteerAngleDeg = isFront
+      ? isOutside
+        ? geometricAckermann.outsideSteerDeg
+        : geometricAckermann.insideSteerDeg
+      : 0;
 
     const staticCamberDeg = isFront ? setup.frontStaticCamberDeg : setup.rearStaticCamberDeg;
     const geometry = isFront ? setup.frontGeometry : setup.rearGeometry;
     const rideHeightDeltaMm = isFront
-      ? setup.frontRideHeightDeltaMm
-      : setup.rearRideHeightDeltaMm;
+      ? setup.frontRideHeightDeltaMm - loadSol.frontHeaveTravelMm
+      : setup.rearRideHeightDeltaMm - loadSol.rearHeaveTravelMm;
 
     const camberResult = calculateDynamicWheelCamber({
       staticCamberDeg,
@@ -125,30 +144,34 @@ export function evaluatePhaseMechanics(
       bodyRollDeg: loadSol.bodyRollDeg,
       isOutsideWheel: isOutside,
       isFrontWheel: isFront,
-      steerAngleDeg,
+      steerAngleDeg: geometricSteerAngleDeg,
       casterDeg: isFront ? setup.frontCasterDeg : 0,
       kpiDeg: isFront ? setup.frontKpiDeg : 0,
     });
 
     // 1. Illustrative width/load-sensitivity profile, not measured tyre data.
     // Width scaling is not a universal contact-patch area law or load rating.
+    // Strictly monotonic and globally concave F_max(F_z) for k_sens > 0.
     const widthCapacityScale = Math.pow(
       Math.max(165, tireWidthMm) / Math.max(165, oemRefWidthMm),
       1.35
     );
     const effectiveNominalFzN = Math.max(500, staticFzN * widthCapacityScale);
 
-    const loadRatio = Math.max(0.12, dynamicFzN / effectiveNominalFzN);
-    const excessLoadDelta = loadRatio - 1.0;
+    const loadRatio = Math.max(0, dynamicFzN / effectiveNominalFzN);
+    const kSens = Math.max(0, Math.min(0.85, setup.tireLoadSensitivityExponent));
+    const satCoeff = 4.2 * kSens;
     const baseLoadSensitiveMu =
       setup.peakFrictionCoefficient *
-      Math.pow(loadRatio, -setup.tireLoadSensitivityExponent) *
-      Math.max(0.62, 1 - 0.14 * excessLoadDelta * excessLoadDelta);
+      (0.5 * Math.pow((loadRatio + 0.05) / 1.05, -kSens) +
+        0.5 * ((1 + satCoeff) / (1 + satCoeff * loadRatio)));
 
-    // 2. Dynamic Camber Efficiency (C_gamma)
-    const optimalDynamicCamber = isOutside ? -2.2 : -0.5;
+    // 2. Dynamic Camber Efficiency (C_gamma), blended smoothly to symmetric 0 deg at 0g lateral
+    const corneringOptimalCamber = isOutside ? -1.5 : -0.5;
+    const corneringCamberWeight = isOutside ? 0.025 : 0.006;
+    const optimalDynamicCamber = corneringOptimalCamber * lateralBlend;
+    const camberWeight = 0.012 * (1 - lateralBlend) + corneringCamberWeight * lateralBlend;
     const camberErrorDeg = camberResult.dynamicCamberDeg - optimalDynamicCamber;
-    const camberWeight = isOutside ? 0.025 : 0.006;
     const camberEfficiency = Math.max(
       0.78,
       1.0 - camberWeight * camberErrorDeg * camberErrorDeg
@@ -267,30 +290,40 @@ export function evaluatePhaseMechanics(
       rearWidthMod -
     tlltdBias * 3.8 * effectiveAyG;
 
-  // Toe & LSD Yaw Modifiers
-  const frontToeMultiplier = phase === 'entry' ? 1.45 : 0.75;
-  frontAxleSlipAngleDeg += setup.frontStaticToeDeg * frontToeMultiplier;
-  rearAxleSlipAngleDeg -= setup.rearStaticToeDeg * 1.25;
+  // Toe & LSD Yaw Modifiers (vanish smoothly at 0g lateral)
+  const rearAxleFzTotal = wheels.RL.dynamicFzN + wheels.RR.dynamicFzN;
+  const rearLatAsym =
+    rearAxleFzTotal > 0
+      ? Math.abs(wheels.RR.dynamicFzN - wheels.RL.dynamicFzN) / rearAxleFzTotal
+      : 0;
+  const frontToeMultiplier = phase === 'entry' ? 0.9 : 0.5;
+  frontAxleSlipAngleDeg += setup.frontStaticToeDeg * frontToeMultiplier * lateralBlend;
+  rearAxleSlipAngleDeg -= setup.rearStaticToeDeg * 0.5 * rearLatAsym;
 
-  if (phase === 'entry' || driver.speedKmh < 100) {
-    const ackDeviation = (setup.ackermannPct - 65) / 100;
-    frontAxleSlipAngleDeg -= ackDeviation * 0.25;
-  }
+  const ackSpeedWeight =
+    phase === 'entry' ? 1 : Math.max(0, Math.min(1, (140 - driver.speedKmh) / 80));
+  const ackDeviation = (setup.ackermannPct - 65) / 100;
+  frontAxleSlipAngleDeg -= ackDeviation * 0.25 * ackSpeedWeight * lateralBlend;
 
   if (phase === 'entry' && netAxG < 0) {
-    const decelStability = ((setup.lsdDecelLockPct - 40) / 100) * 0.55;
-    rearAxleSlipAngleDeg -= decelStability;
+    const decelStability = ((setup.lsdDecelLockPct - 40) / 100) * 0.55 * lateralBlend;
+    if (setup.frontTorqueSplitPct >= 100) {
+      frontAxleSlipAngleDeg += decelStability;
+    } else {
+      rearAxleSlipAngleDeg -= decelStability;
+    }
   } else if (phase === 'exit' && netAxG > 0) {
     const accelLockDelta = (setup.lsdAccelLockPct - 40) / 100;
     if (setup.drivetrain === 'FF') {
-      frontAxleSlipAngleDeg -= accelLockDelta * 0.65;
+      frontAxleSlipAngleDeg -= accelLockDelta * 0.65 * lateralBlend;
     } else {
-      rearAxleSlipAngleDeg += accelLockDelta * driver.throttleG * 0.85;
+      rearAxleSlipAngleDeg += accelLockDelta * driver.throttleG * 0.85 * lateralBlend;
     }
   }
 
   const slipDeltaDeg = frontAxleSlipAngleDeg - rearAxleSlipAngleDeg;
-  const understeerGradientDegPerG = slipDeltaDeg / Math.max(0.3, effectiveAyG);
+  const understeerGradientDegPerG =
+    Math.abs(effectiveAyG) > 1e-6 ? slipDeltaDeg / Math.max(0.3, Math.abs(effectiveAyG)) : 0;
 
   const rawScore = slipDeltaDeg * 24;
   const phaseBalanceScore = Math.max(-100, Math.min(100, Number(rawScore.toFixed(1))));
@@ -390,8 +423,8 @@ export function simulateVehicleState(
   }
 
   if (
-    Math.abs(loadSol.frontJackingForceN) > 1200 ||
-    Math.abs(loadSol.rearJackingForceN) > 1400
+    Math.abs(loadSol.frontJackingForceN) > 700 ||
+    Math.abs(loadSol.rearJackingForceN) > 900
   ) {
     warnings.push({
       id: 'jacking_force',

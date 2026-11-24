@@ -12,8 +12,7 @@ import {
   SuspensionGeometryType,
   kmhToMph,
   mphToKmh,
-  nmmToLbsPerIn,
-  solveRideFrequencyTarget,
+  newtonsToLbs,
 } from '../../engine';
 import { useTuningStore } from '../../store/useTuningStore';
 import { ThemePalette } from '../../theme/colors';
@@ -54,11 +53,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
     applyAlignmentPreset,
     applyTireSetupPreset,
     applyRideFrequencyPreset,
-    setTargetRideFrequencyHz,
-    updateSetup,
     updateDriver,
-    pinCurrentAsBaseline,
-    revertToBaseline,
     resetToArchetypeDefault,
   } = useTuningStore();
 
@@ -67,9 +62,6 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
   const [showGeometryPicker, setShowGeometryPicker] = useState(false);
 
   const activeArchetype = DRIVETRAIN_ARCHETYPES[setup.drivetrain];
-  const baseSetup = pinnedBaseline?.setup;
-  const frontFrequencyRange = solveRideFrequencyTarget(currentSim.kinematics.frontNaturalFreqHz, setup, 'front');
-  const rearFrequencyRange = solveRideFrequencyTarget(currentSim.kinematics.rearNaturalFreqHz, setup, 'rear');
   const baseDriver = pinnedBaseline?.driver;
 
   const isOemStagger =
@@ -239,7 +231,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
           </View>
         ) : null}
 
-        {/* My Car's Existing Setup Drawer: Alignment, Tire Width (Stagger vs Square), Ride Freq & Roll Centers */}
+        {/* Platform Summary & Quick Presets Drawer (sliders live in Tune setup below) */}
         {showCarSpecsDrawer ? (
           <View
             style={[
@@ -248,125 +240,94 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
             ]}
           >
             <Text style={[styles.subSectionHeader, { color: theme.accentPrimary }]}>
-              1. EXISTING ALIGNMENT (CAMBER & TOE PRESETS OR CUSTOM)
+              PLATFORM SUMMARY
             </Text>
-            <Text style={[styles.subCaption, { color: theme.textMuted, marginBottom: 6 }]}>
-              Choose an illustrative alignment profile or enter measured values:
-            </Text>
+            <View style={styles.specSummaryGrid}>
+              {[
+                {
+                  label: 'Curb weight',
+                  value: `${Math.round(newtonsToLbs(setup.massKg * 9.81))} lb (${setup.massKg} kg)`,
+                },
+                {
+                  label: 'Wheelbase / track',
+                  value: `${setup.wheelbaseMm} · ${setup.frontTrackMm}/${setup.rearTrackMm} mm`,
+                },
+                {
+                  label: 'Weight split / CG',
+                  value: `${Math.round(setup.frontWeightFraction * 100)}/${Math.round((1 - setup.frontWeightFraction) * 100)} · ${setup.cgHeightMm} mm`,
+                },
+                {
+                  label: 'Ride freq F / R',
+                  value: `${currentSim.kinematics.frontNaturalFreqHz.toFixed(2)} / ${currentSim.kinematics.rearNaturalFreqHz.toFixed(2)} Hz`,
+                },
+                {
+                  label: 'Dyn RC F / R · h_roll',
+                  value: `${currentSim.kinematics.effectiveFrontRollCenterMm.toFixed(0)}/${currentSim.kinematics.effectiveRearRollCenterMm.toFixed(0)} · ${currentSim.kinematics.rollMomentArmMm.toFixed(0)} mm`,
+                },
+                {
+                  label: 'Alignment F / R',
+                  value: `${setup.frontStaticCamberDeg.toFixed(1)}°/${setup.rearStaticCamberDeg.toFixed(1)}° cam · ${setup.frontStaticToeDeg.toFixed(2)}°/${setup.rearStaticToeDeg.toFixed(2)}° toe`,
+                },
+              ].map((item) => (
+                <View
+                  key={item.label}
+                  style={[styles.specCell, { borderColor: theme.borderSubtle, backgroundColor: theme.bgCard }]}
+                >
+                  <Text style={[styles.specLabel, { color: theme.textMuted }]}>{item.label}</Text>
+                  <Text style={[styles.specValue, { color: theme.textPrimary }]}>{item.value}</Text>
+                </View>
+              ))}
+            </View>
 
-            <View style={styles.presetPillRow}>
-              {ALIGNMENT_PRESET_LIST.map((presetId) => {
-                const p = ALIGNMENT_PRESETS[presetId];
-                const isSelected =
-                  Math.abs(setup.frontStaticCamberDeg - p.frontStaticCamberDeg) < 0.08 &&
-                  Math.abs(setup.rearStaticCamberDeg - p.rearStaticCamberDeg) < 0.08 &&
-                  Math.abs(setup.frontStaticToeDeg - p.frontStaticToeDeg) < 0.03 &&
-                  Math.abs(setup.rearStaticToeDeg - p.rearStaticToeDeg) < 0.03;
-                return (
-                  <Pressable accessibilityRole="button"
-                    key={presetId}
-                    onPress={() => applyAlignmentPreset(presetId)}
-                    accessibilityState={{ selected: isSelected }}
-                    style={[
-                      styles.geomPill,
-                      {
-                        backgroundColor: isSelected ? theme.accentPrimary : theme.bgCard,
-                        borderColor: isSelected ? theme.accentPrimary : theme.border,
-                      },
-                    ]}
-                  >
-                    <Text
+            <View style={[styles.subSectionDivider, { borderTopColor: theme.borderSubtle }]}>
+              <Text style={[styles.subSectionHeader, { color: theme.accentPrimary }]}>
+                1. QUICK ALIGNMENT PRESETS
+              </Text>
+              <View style={styles.presetPillRow}>
+                {ALIGNMENT_PRESET_LIST.map((presetId) => {
+                  const p = ALIGNMENT_PRESETS[presetId];
+                  const isSelected =
+                    Math.abs(setup.frontStaticCamberDeg - p.frontStaticCamberDeg) < 0.08 &&
+                    Math.abs(setup.rearStaticCamberDeg - p.rearStaticCamberDeg) < 0.08 &&
+                    Math.abs(setup.frontStaticToeDeg - p.frontStaticToeDeg) < 0.03 &&
+                    Math.abs(setup.rearStaticToeDeg - p.rearStaticToeDeg) < 0.03;
+                  return (
+                    <Pressable
+                      accessibilityRole="button"
+                      key={presetId}
+                      onPress={() => applyAlignmentPreset(presetId)}
+                      accessibilityState={{ selected: isSelected }}
                       style={[
-                        styles.geomPillText,
-                        { color: isSelected ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textPrimary },
+                        styles.geomPill,
+                        {
+                          backgroundColor: isSelected ? theme.accentPrimary : theme.bgCard,
+                          borderColor: isSelected ? theme.accentPrimary : theme.border,
+                        },
                       ]}
                     >
-                      {p.shortLabel} ({p.frontStaticCamberDeg}°F / {p.rearStaticCamberDeg}°R)
-                    </Text>
-                  </Pressable>
-                );
-              })}
+                      <Text
+                        style={[
+                          styles.geomPillText,
+                          { color: isSelected ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textPrimary },
+                        ]}
+                      >
+                        {p.shortLabel} ({p.frontStaticCamberDeg}°F / {p.rearStaticCamberDeg}°R)
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
             </View>
 
-            <View style={styles.compactSlidersGrid}>
-              <ParameterSlider
-                label="Front Static Camber (γ_0,f)"
-                value={setup.frontStaticCamberDeg}
-                baselineValue={baseSetup?.frontStaticCamberDeg}
-                min={-4.2}
-                max={-0.5}
-                step={0.1}
-                decimals={1}
-                unit="°"
-                leftHint="-4.2° (Track Plates)"
-                rightHint="-0.5° (Mild Camber)"
-                onChange={(frontStaticCamberDeg) =>
-                  updateSetup({ frontStaticCamberDeg })
-                }
-                theme={theme}
-              />
-              <ParameterSlider
-                label="Rear Static Camber (γ_0,r)"
-                value={setup.rearStaticCamberDeg}
-                baselineValue={baseSetup?.rearStaticCamberDeg}
-                min={-3.8}
-                max={-0.5}
-                step={0.1}
-                decimals={1}
-                unit="°"
-                leftHint="-3.8° (Max Rear Grip)"
-                rightHint="-0.5° (Mild Camber)"
-                onChange={(rearStaticCamberDeg) =>
-                  updateSetup({ rearStaticCamberDeg })
-                }
-                theme={theme}
-              />
-              <ParameterSlider
-                label="Front Static Toe (-Out / +In)"
-                value={setup.frontStaticToeDeg}
-                baselineValue={baseSetup?.frontStaticToeDeg}
-                min={-0.35}
-                max={0.35}
-                step={0.04}
-                decimals={2}
-                unit="°"
-                leftHint="-0.35° Toe-Out (Turn-In)"
-                rightHint="+0.35° Toe-In (Safe US)"
-                onChange={(frontStaticToeDeg) =>
-                  updateSetup({ frontStaticToeDeg })
-                }
-                theme={theme}
-              />
-              <ParameterSlider
-                label="Rear Static Toe (+Toe-In Stabilizes)"
-                value={setup.rearStaticToeDeg}
-                baselineValue={baseSetup?.rearStaticToeDeg}
-                min={-0.1}
-                max={0.55}
-                step={0.04}
-                decimals={2}
-                unit="°"
-                leftHint="-0.10° (Loose)"
-                rightHint="+0.55° Toe-In (Planted)"
-                onChange={(rearStaticToeDeg) =>
-                  updateSetup({ rearStaticToeDeg })
-                }
-                theme={theme}
-              />
-            </View>
-
-            {/* Tire Widths: Staggered vs Square Setup */}
             <View style={[styles.subSectionDivider, { borderTopColor: theme.borderSubtle }]}>
               <Text style={[styles.subSectionHeader, { color: theme.accentSecondary }]}>
-                2. TIRE WIDTH & SQUARE VS. STAGGERED SETUP (SAME COMPOUND)
+                2. TIRE SIZING PRESETS (SQUARE VS. STAGGERED)
               </Text>
-              <Text style={[styles.subCaption, { color: theme.textMuted, marginBottom: 6 }]}>
-                Tire size effects use an illustrative profile; validate changes against measured tire data:
-              </Text>
-
               <View style={styles.presetPillRow}>
-                <Pressable accessibilityRole="button"
+                <Pressable
+                  accessibilityRole="button"
                   onPress={() => applyTireSetupPreset('oem_stagger')}
+                  accessibilityState={{ selected: isOemStagger }}
                   style={[
                     styles.geomPill,
                     {
@@ -381,24 +342,22 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                       { color: isOemStagger ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A') : theme.textPrimary },
                     ]}
                   >
-                    Baseline Tire Sizing ({activeArchetype.oemFrontTireWidthMm}F /{' '}
+                    Baseline sizing ({activeArchetype.oemFrontTireWidthMm}F /{' '}
                     {activeArchetype.oemRearTireWidthMm}R mm)
                   </Text>
                 </Pressable>
 
-                <Pressable accessibilityRole="button"
+                <Pressable
+                  accessibilityRole="button"
                   onPress={() => applyTireSetupPreset('square_track')}
+                  accessibilityState={{ selected: isSquareSetup && !isOemStagger }}
                   style={[
                     styles.geomPill,
                     {
                       backgroundColor:
-                        isSquareSetup && !isOemStagger
-                          ? theme.accentSecondary
-                          : theme.bgCard,
+                        isSquareSetup && !isOemStagger ? theme.accentSecondary : theme.bgCard,
                       borderColor:
-                        isSquareSetup && !isOemStagger
-                          ? theme.accentSecondary
-                          : theme.border,
+                        isSquareSetup && !isOemStagger ? theme.accentSecondary : theme.border,
                     },
                   ]}
                 >
@@ -408,7 +367,9 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                       {
                         color:
                           isSquareSetup && !isOemStagger
-                            ? (theme.mode === 'daylight' ? '#FFFFFF' : '#0A111A')
+                            ? theme.mode === 'daylight'
+                              ? '#FFFFFF'
+                              : '#0A111A'
                             : theme.textPrimary,
                       },
                     ]}
@@ -418,49 +379,12 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                   </Text>
                 </Pressable>
               </View>
-
-              <ParameterSlider
-                label="Front Tire Section Width (mm)"
-                value={setup.frontTireWidthMm}
-                baselineValue={baseSetup?.frontTireWidthMm}
-                min={195}
-                max={325}
-                step={10}
-                unit="mm"
-                leftHint="195mm (Narrower / Lower Fz,nom)"
-                rightHint="325mm (Wider / Higher Front Grip)"
-                onChange={(frontTireWidthMm) =>
-                  updateSetup({ frontTireWidthMm })
-                }
-                theme={theme}
-              />
-              <ParameterSlider
-                label="Rear Tire Section Width (mm)"
-                value={setup.rearTireWidthMm}
-                baselineValue={baseSetup?.rearTireWidthMm}
-                min={195}
-                max={345}
-                step={10}
-                unit="mm"
-                leftHint="195mm (Narrower)"
-                rightHint="345mm (Wider Rear Profile)"
-                onChange={(rearTireWidthMm) =>
-                  updateSetup({ rearTireWidthMm })
-                }
-                theme={theme}
-              />
             </View>
 
-            {/* Ride Frequencies, Roll Centers & h_roll */}
             <View style={[styles.subSectionDivider, { borderTopColor: theme.borderSubtle }]}>
               <Text style={[styles.subSectionHeader, { color: theme.accentPrimary }]}>
-                3. RIDE FREQUENCIES (f_n), ROLL CENTERS & ROLL MOMENT ARM (h_roll)
+                3. RIDE FREQUENCY TARGETS
               </Text>
-              <Text style={[styles.subCaption, { color: theme.textMuted, marginBottom: 6 }]}>
-                Adjust target Ride Frequency (auto-solves spring rate K_s) or Roll Center heights (live h_roll ={' '}
-                {currentSim.kinematics.rollMomentArmMm.toFixed(0)}mm):
-              </Text>
-
               <View style={styles.presetPillRow}>
                 {RIDE_FREQ_PRESET_LIST.map((rfId) => {
                   const rf = RIDE_FREQUENCY_PRESETS[rfId];
@@ -468,7 +392,8 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                     Math.abs(currentSim.kinematics.frontNaturalFreqHz - rf.targetFrontHz) < 0.12 &&
                     Math.abs(currentSim.kinematics.rearNaturalFreqHz - rf.targetRearHz) < 0.12;
                   return (
-                    <Pressable accessibilityRole="button"
+                    <Pressable
+                      accessibilityRole="button"
                       key={rfId}
                       onPress={() => applyRideFrequencyPreset(rfId)}
                       accessibilityState={{ selected: isActive }}
@@ -492,86 +417,15 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
                   );
                 })}
               </View>
-
-              <ParameterSlider
-                label={`Target Front Ride Frequency (f_n,f • Spring ${Math.round(
-                  nmmToLbsPerIn(setup.frontSpringRateNmm)
-                )} lbs/in)`}
-                value={Number(currentSim.kinematics.frontNaturalFreqHz.toFixed(2))}
-                baselineValue={
-                  pinnedBaseline
-                    ? Number(pinnedBaseline.sim.kinematics.frontNaturalFreqHz.toFixed(2))
-                    : undefined
-                }
-                min={frontFrequencyRange.minAchievableFrequencyHz}
-                max={frontFrequencyRange.maxAchievableFrequencyHz}
-                allowOutOfRangeInput
-                step={0.05}
-                decimals={2}
-                unit="Hz"
-                leftHint={`${frontFrequencyRange.minAchievableFrequencyHz.toFixed(2)} Hz minimum`}
-                rightHint={`${frontFrequencyRange.maxAchievableFrequencyHz.toFixed(2)} Hz maximum`}
-                onChange={(targetHz) => setTargetRideFrequencyHz('front', targetHz)}
-                theme={theme}
-              />
-              <ParameterSlider
-                label={`Target Rear Ride Frequency (f_n,r • Spring ${Math.round(
-                  nmmToLbsPerIn(setup.rearSpringRateNmm)
-                )} lbs/in)`}
-                value={Number(currentSim.kinematics.rearNaturalFreqHz.toFixed(2))}
-                baselineValue={
-                  pinnedBaseline
-                    ? Number(pinnedBaseline.sim.kinematics.rearNaturalFreqHz.toFixed(2))
-                    : undefined
-                }
-                min={rearFrequencyRange.minAchievableFrequencyHz}
-                max={rearFrequencyRange.maxAchievableFrequencyHz}
-                allowOutOfRangeInput
-                step={0.05}
-                decimals={2}
-                unit="Hz"
-                leftHint={`${rearFrequencyRange.minAchievableFrequencyHz.toFixed(2)} Hz minimum`}
-                rightHint={`${rearFrequencyRange.maxAchievableFrequencyHz.toFixed(2)} Hz maximum`}
-                onChange={(targetHz) => setTargetRideFrequencyHz('rear', targetHz)}
-                theme={theme}
-              />
-
-              <ParameterSlider
-                label={`Nominal Front Roll Center (Dyn: ${currentSim.kinematics.effectiveFrontRollCenterMm.toFixed(0)}mm)`}
-                value={setup.nominalFrontRollCenterMm}
-                baselineValue={baseSetup?.nominalFrontRollCenterMm}
-                min={10}
-                max={120}
-                step={5}
-                unit="mm"
-                leftHint="10mm (Larger h_roll)"
-                rightHint="120mm (Raised RC Kit)"
-                onChange={(nominalFrontRollCenterMm) =>
-                  updateSetup({ nominalFrontRollCenterMm })
-                }
-                theme={theme}
-              />
-              <ParameterSlider
-                label={`Nominal Rear Roll Center (Dyn: ${currentSim.kinematics.effectiveRearRollCenterMm.toFixed(0)}mm)`}
-                value={setup.nominalRearRollCenterMm}
-                baselineValue={baseSetup?.nominalRearRollCenterMm}
-                min={20}
-                max={150}
-                step={5}
-                unit="mm"
-                leftHint="20mm (Lower Rear RC)"
-                rightHint="150mm (Raised Rear RC)"
-                onChange={(nominalRearRollCenterMm) =>
-                  updateSetup({ nominalRearRollCenterMm })
-                }
-                theme={theme}
-              />
+              <Text style={[styles.subCaption, { color: theme.textMuted }]}>
+                Fine-tune individual camber, toe, spring, and tire values in Tune setup below.
+              </Text>
             </View>
           </View>
         ) : null}
 
-        <Pressable accessibilityRole="button" onPress={resetToArchetypeDefault} style={{ paddingTop: 10, alignSelf: 'flex-start' }}>
-          <Text style={{ color: theme.textMuted, fontSize: 10 }}>Reset profile defaults</Text>
+        <Pressable accessibilityRole="button" onPress={resetToArchetypeDefault} style={styles.resetBtn}>
+          <Text style={{ color: theme.textMuted, fontSize: 11, fontWeight: '600' }}>Reset profile defaults</Text>
         </Pressable>
       </View>
 
@@ -585,7 +439,7 @@ export const ArchetypeAndDriverBar: React.FC<ArchetypeAndDriverBarProps> = ({
         <Pressable accessibilityRole="button"
           onPress={() => setShowDriverSliders((v) => !v)}
           aria-expanded={showDriverSliders} accessibilityState={{ expanded: showDriverSliders }}
-          style={styles.topRow}
+          style={[styles.topRow, styles.driverHeaderBtn]}
         >
           <View style={{ flexShrink: 1, maxWidth: '100%' }}>
             <Text style={[styles.sectionHeader, { color: theme.accentSecondary }]}>
@@ -786,9 +640,10 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   smallToggleBtn: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderRadius: 7,
     borderWidth: 1,
   },
   smallToggleBtnText: {
@@ -798,12 +653,14 @@ const styles = StyleSheet.create({
   archetypePillRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
-    marginBottom: 6,
+    gap: 8,
+    marginBottom: 8,
   },
   archPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    minHeight: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 14,
     borderRadius: 8,
     borderWidth: 1,
   },
@@ -813,7 +670,13 @@ const styles = StyleSheet.create({
   },
   archExamplesText: {
     fontSize: 12,
-    lineHeight: 15,
+    lineHeight: 16,
+  },
+  resetBtn: {
+    minHeight: 44,
+    justifyContent: 'center',
+    alignSelf: 'flex-start',
+    marginTop: 4,
   },
   geometrySection: {
     marginTop: 8,
@@ -822,23 +685,45 @@ const styles = StyleSheet.create({
   },
   carSpecsDrawer: {
     marginTop: 10,
-    padding: 10,
+    padding: 12,
     borderRadius: 10,
     borderTopWidth: 1,
   },
+  specSummaryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 6,
+  },
+  specCell: {
+    flexBasis: '46%',
+    flexGrow: 1,
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 3,
+  },
+  specLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  specValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    fontVariant: ['tabular-nums'],
+  },
   subSectionDivider: {
-    marginTop: 10,
-    paddingTop: 10,
+    marginTop: 12,
+    paddingTop: 12,
     borderTopWidth: 1,
   },
   presetPillRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
-    marginBottom: 8,
-  },
-  compactSlidersGrid: {
-    gap: 2,
+    gap: 8,
+    marginTop: 6,
+    marginBottom: 4,
   },
   geomLabel: {
     fontSize: 12,
@@ -848,11 +733,12 @@ const styles = StyleSheet.create({
   geomRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 8,
   },
   geomPill: {
-    paddingHorizontal: 9,
-    paddingVertical: 5,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
     borderRadius: 7,
     borderWidth: 1,
   },
@@ -880,6 +766,10 @@ const styles = StyleSheet.create({
   },
   driverControlsBody: {
     marginTop: 8,
+  },
+  driverHeaderBtn: {
+    minHeight: 44,
+    marginBottom: 0,
   },
   surfaceRow: {
     flexDirection: 'row',

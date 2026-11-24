@@ -1,3 +1,4 @@
+import { MAX_SPRING_RATE_NMM } from './kinematics';
 import { simulateVehicleState } from './tireModel';
 import {
   AdjustmentScope,
@@ -18,9 +19,15 @@ interface CandidateAdjustmentBlueprint {
   scope: AdjustmentScope;
   applicableSymptoms: HandlingSymptomType[];
   applicablePhases: CornerPhase[];
+  isApplicable?: (
+    setup: VehicleSetup,
+    driver: DriverInputState,
+    query: DiagnosticQuery
+  ) => boolean;
   buildPatch: (
     setup: VehicleSetup,
-    driver: DriverInputState
+    driver: DriverInputState,
+    baselineSim?: SimulationResult
   ) => {
     directionLabel: string;
     setupPatch: Partial<VehicleSetup>;
@@ -41,8 +48,11 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     title: 'Soften Front Anti-Roll Bar (ARB)',
     category: 'Anti-Roll Bars',
     scope: 'trackside',
-    applicableSymptoms: ['understeer', 'slow_turn_in_response'],
+    applicableSymptoms: ['understeer', 'slow_turn_in_response', 'poor_traction_exit'],
     applicablePhases: ['entry', 'mid', 'exit'],
+    isApplicable: (setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' ||
+      (query.phase === 'exit' && setup.frontTorqueSplitPct > 0),
     buildPatch: (setup) => {
       if (setup.frontArbStiffnessNmPerDeg <= 120) return null;
       const next = Math.max(100, Math.round(setup.frontArbStiffnessNmPerDeg - 90));
@@ -52,7 +62,7 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Reduces front roll stiffness (K_φ,f) and lowers Front Roll Stiffness Ratio (FRSR), shifting lateral load transfer rearward so the outer front tire operates at a lower vertical load and generates higher cornering efficiency.',
+      'Reduces front roll stiffness (K_φ,f) and lowers Front Roll Stiffness Ratio (FRSR), shifting lateral load transfer rearward so the outer front tire operates at a lower vertical load and generates higher cornering efficiency (and leaves more front traction reserve on FWD/AWD exits).',
     equationReference: 'FRSR = K_φ,f / (K_φ,f + K_φ,r)',
     secondaryTradeoff:
       'Increases total chassis roll angle (φ); on MacPherson strut fronts, excessive roll can cost dynamic negative camber if front spring rate is too soft.',
@@ -87,8 +97,12 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry', 'mid'],
-    buildPatch: (setup) => {
+    buildPatch: (setup, _driver, baselineSim) => {
       if (setup.frontStaticCamberDeg <= -3.8) return null;
+      const outsideFront = baselineSim
+        ? Object.values(baselineSim.wheels).find((w) => w.isFront && w.isOutside)
+        : undefined;
+      if (outsideFront && outsideFront.dynamicCamberDeg <= -1.6) return null;
       const step = setup.frontStaticCamberDeg > -1.5 ? 0.8 : 0.5;
       const next = Number((setup.frontStaticCamberDeg - step).toFixed(1));
       return {
@@ -97,8 +111,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Compensates for chassis body roll angle (φ) and radial sidewall rollover, keeping the outside front tire contact patch flat against the asphalt and generating additional lateral camber thrust (C_γ).',
-    equationReference: 'γ_dyn = γ_0 + (dγ/dz)Δz + (dγ/dφ)φ - ν sin(δ)',
+      'Compensates for chassis body roll angle (φ) and radial sidewall rollover, keeping the outside front tire contact patch flat against the asphalt and generating additional lateral camber efficiency.',
+    equationReference: 'γ_dyn = γ_0 + (dγ/dz)Δz ± φ - ν sin(δ) + σ(1 - cos(δ))',
     secondaryTradeoff:
       'Slightly reduces straight-line braking contact patch area and increases inner shoulder tire wear on street/highway drives.',
   },
@@ -108,8 +122,11 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     title: 'Widen Front Tire Section Width (Toward Square Setup)',
     category: 'Tire Pressures & Sizing',
     scope: 'shop',
-    applicableSymptoms: ['understeer', 'slow_turn_in_response'],
+    applicableSymptoms: ['understeer', 'slow_turn_in_response', 'poor_traction_exit'],
     applicablePhases: ['entry', 'mid', 'exit'],
+    isApplicable: (setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' ||
+      (query.phase === 'exit' && setup.frontTorqueSplitPct > 0),
     buildPatch: (setup) => {
       if (setup.frontTireWidthMm >= setup.rearTireWidthMm + 10) return null;
       const nextWidth =
@@ -170,8 +187,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Reduces rear understeer stabilizing slip angle (δ_RU), allowing the rear axle to rotate more freely through mid-corner and apex.',
-    equationReference: 'α_r,eff = α_r - k_toe · δ_T,r',
+      'Reduces rear understeer stabilizing slip bias, allowing the rear axle to rotate more freely through mid-corner and apex.',
+    equationReference: 'α_r,eff = α_r - 0.5 · (|Fz,out - Fz,in| / Fz,axle) · δ_T,r',
     secondaryTradeoff:
       'May reduce rear stability under braking and direction changes; the appropriate toe range depends on the vehicle and measured compliance.',
   },
@@ -192,8 +209,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Reduces transient compressive force resistance on the outside front damper during initial turn-in and trail-braking, slowing the rate of front lateral load transfer so the outer front tire does not spike and wash out.',
-    equationReference: 'ζ_LS,f = C_wheel,f / (2√(K_w,f · m_s,f))',
+      'Reduces illustrative transient front roll-transfer bias during initial turn-in and trail-braking, slowing the build-up of outer front load transfer so the outside front tire does not saturate early.',
+    equationReference: 'ΔFRSR_transient = (Δζ_bump,f · 0.22 - Δζ_reb,r · 0.18 + Δζ_reb,f · 0.08) · abruptness',
     secondaryTradeoff:
       'Allows slightly faster nose dive on initial brake pedal application.',
   },
@@ -203,8 +220,11 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     title: 'Stiffen Front Low-Speed Rebound Damping',
     category: 'Dampers',
     scope: 'trackside',
-    applicableSymptoms: ['understeer'],
+    applicableSymptoms: ['understeer', 'poor_traction_exit'],
     applicablePhases: ['exit'],
+    isApplicable: (setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' ||
+      (query.phase === 'exit' && setup.frontTorqueSplitPct > 0),
     buildPatch: (setup) => {
       if (setup.frontLsReboundClicks >= 18) return null;
       const next = Math.min(19, setup.frontLsReboundClicks + 3);
@@ -214,8 +234,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Resists front suspension extension when applying throttle at corner exit, holding vertical load on the front contact patches longer (especially critical on RR 911 and MR platforms).',
-    equationReference: 'F_damper,reb = -C_LS,reb · dz/dt',
+      'Resists unwinding roll on the outside front corner during corner-exit throttle application, keeping illustrative elastic roll support biased rearward (-shift) to improve exit front bite (especially on RR/MR and FWD exit).',
+    equationReference: 'ΔFRSR_transient = (-Δζ_reb,f · 0.18 - Δζ_bump,r · 0.22) · abruptness',
     secondaryTradeoff:
       'If stiffened excessively, the front suspension can "pack down" over successive mid-corner bumps.',
   },
@@ -228,16 +248,16 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     applicableSymptoms: ['understeer'],
     applicablePhases: ['mid', 'exit'],
     buildPatch: (setup) => {
-      if (setup.rearSpringRateNmm >= 220) return null;
-      const nextRear = Math.min(220, setup.rearSpringRateNmm + 15);
+      if (setup.rearSpringRateNmm >= MAX_SPRING_RATE_NMM) return null;
+      const nextRear = Math.min(MAX_SPRING_RATE_NMM, setup.rearSpringRateNmm + 15);
       return {
         directionLabel: `Increase Rear Spring Rate (${setup.rearSpringRateNmm} → ${nextRear} N/mm)`,
         setupPatch: { rearSpringRateNmm: nextRear },
       };
     },
     physicalMechanism:
-      'Increases rear wheel rate (K_w,r = K_s,r · MR_r²), rear ride frequency (f_n,r), and rear spring roll stiffness (0.5 · K_w,r · t_r²), shifting elastic roll stiffness rearward so the front axle maintains a more equal vertical load distribution.',
-    equationReference: 'K_φ,spring = ½ K_w t²,  f_n = (1/2π)√(K_ride / m_s)',
+      'Increases rear wheel rate (K_w,r = K_s,r · MR_r²), rear ride frequency (f_n,r), and rear effective roll stiffness (A_r · (0.5 · K_w,r · t_r² + K_φ,ARB,r)), shifting elastic roll stiffness rearward so the front axle maintains a more equal vertical load distribution.',
+    equationReference: 'K_φ,axle = A_axle · (½ K_w t² + K_φ,ARB),  f_n = (1/2π)√(K_ride / m_s)',
     secondaryTradeoff:
       'Increases rear ride frequency (f_n,r) and reduces rear mechanical compliance over bumpy exit curbs.',
   },
@@ -247,8 +267,11 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     title: 'Optimize Front Hot Tire Pressure',
     category: 'Tire Pressures & Sizing',
     scope: 'trackside',
-    applicableSymptoms: ['understeer'],
+    applicableSymptoms: ['understeer', 'poor_traction_exit'],
     applicablePhases: ['entry', 'mid', 'exit'],
+    isApplicable: (setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' ||
+      (query.phase === 'exit' && setup.frontTorqueSplitPct > 0),
     buildPatch: (setup) => {
       const target = setup.optimalTirePressurePsi;
       if (Math.abs(target - setup.frontTirePressurePsi) < 0.2) return null;
@@ -266,26 +289,36 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
   {
     id: 'us_driver_trail_brake',
     parameterKey: 'driverTrailBrake',
-    title: 'Driver Technique: Progressive Trail-Braking to Load Nose',
+    title: 'Driver Technique: Tune Trail-Brake Overlap Into Turn-In',
     category: 'Driver Technique',
     scope: 'trackside',
     applicableSymptoms: ['understeer', 'slow_turn_in_response'],
     applicablePhases: ['entry'],
     buildPatch: (_setup, driver) => {
-      if (driver.trailBrakeOverlapPct > 65) {
-        const next = 40;
+      if (driver.trailBrakeOverlapPct > 60) {
+        const next = Math.max(40, driver.trailBrakeOverlapPct - 15);
         return {
           directionLabel: `Reduce Excess Trail-Brake Overlap (${driver.trailBrakeOverlapPct}% → ${next}%)`,
           setupPatch: {},
           driverPatch: { trailBrakeOverlapPct: next },
         };
       }
-      const next = Math.min(60, driver.trailBrakeOverlapPct + 20);
-      return {
-        directionLabel: `Increase Progressive Trail-Braking (${driver.trailBrakeOverlapPct}% → ${next}%)`,
-        setupPatch: {},
-        driverPatch: { trailBrakeOverlapPct: next, brakingG: Math.max(0.35, driver.brakingG) },
-      };
+      if (driver.trailBrakeOverlapPct < 60) {
+        const next = Math.min(60, driver.trailBrakeOverlapPct + 20);
+        return {
+          directionLabel: `Increase Progressive Trail-Braking (${driver.trailBrakeOverlapPct}% → ${next}%)`,
+          setupPatch: {},
+          driverPatch: { trailBrakeOverlapPct: next, brakingG: Math.max(0.35, driver.brakingG) },
+        };
+      }
+      if (driver.brakingG < 0.35) {
+        return {
+          directionLabel: `Add Light Trail-Braking (${driver.brakingG.toFixed(2)}G → 0.35G)`,
+          setupPatch: {},
+          driverPatch: { brakingG: 0.35 },
+        };
+      }
+      return null;
     },
     physicalMechanism:
       'Carrying light, progressive braking into turn-in transfers longitudinal weight (ΔW_long = W·h_CG·a_x / g·L) onto the front axle, enlarging the front contact patch normal load before blending to pure cornering.',
@@ -327,6 +360,9 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'poor_traction_exit'],
     applicablePhases: ['entry', 'mid', 'exit'],
+    isApplicable: (setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' ||
+      (query.phase === 'exit' && setup.frontTorqueSplitPct < 100),
     buildPatch: (setup) => {
       if (setup.rearArbStiffnessNmPerDeg <= 100) return null;
       const next = Math.max(80, Math.round(setup.rearArbStiffnessNmPerDeg - 90));
@@ -337,7 +373,7 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     },
     physicalMechanism:
       'Reduces rear lateral load transfer (ΔF_z,lat,r), keeping both rear tires more evenly loaded to maximize total rear lateral grip and corner-exit forward traction.',
-    equationReference: 'K_φ,rear = ½ K_w,r t_r² + K_φ,ARB,r',
+    equationReference: 'K_φ,rear = A_r · (½ K_w,r t_r² + K_φ,ARB,r)',
     secondaryTradeoff:
       'Slightly slows initial turn-in rotation and increases body roll angle.',
   },
@@ -349,8 +385,12 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['oversteer'],
     applicablePhases: ['mid', 'exit'],
-    buildPatch: (setup) => {
+    buildPatch: (setup, _driver, baselineSim) => {
       if (setup.rearStaticCamberDeg <= -3.4) return null;
+      const outsideRear = baselineSim
+        ? Object.values(baselineSim.wheels).find((w) => !w.isFront && w.isOutside)
+        : undefined;
+      if (outsideRear && outsideRear.dynamicCamberDeg <= -1.6) return null;
       const next = Number((setup.rearStaticCamberDeg - 0.4).toFixed(1));
       return {
         directionLabel: `Add Rear Negative Camber (${setup.rearStaticCamberDeg.toFixed(1)}° → ${next.toFixed(1)}°)`,
@@ -358,8 +398,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Counteracts chassis body roll angle (φ) at the rear axle, maximizing the outside rear tire contact patch area and generating stabilizing camber thrust (C_γ).',
-    equationReference: 'γ_dyn,r = γ_0,r + (dγ/dz)Δz_r + (dγ/dφ)φ',
+      'Counteracts chassis body roll angle (φ) at the rear axle, keeping the outside rear tire contact patch aligned with the road and improving rear cornering efficiency.',
+    equationReference: 'γ_dyn,r = γ_0,r + (dγ/dz)Δz_r ± φ',
     secondaryTradeoff:
       'Excessive rear negative camber (> -3.0°) slightly reduces straight-line acceleration contact patch footprint.',
   },
@@ -380,8 +420,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Produces a stabilizing understeer slip bias on the heavily loaded outside rear wheel during cornering and braking, reducing attitude angle (β) and resisting tail-out yaw.',
-    equationReference: 'δ_rear,out = +½ δ_T,r (toe-in opposes yaw rotation)',
+      'Produces a stabilizing understeer slip bias on the heavily loaded outside rear wheel during cornering and braking, resisting tail-out yaw.',
+    equationReference: 'α_r,eff = α_r - 0.5 · (|Fz,out - Fz,in| / Fz,axle) · δ_T,r',
     secondaryTradeoff:
       'Slightly increases rolling drag and rear tire temperature/wear.',
   },
@@ -402,8 +442,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Allows the rear suspension to extend smoothly as weight pitches forward under braking, keeping the inside rear tire pressed onto the track surface instead of hiking it in the air on turn-in.',
-    equationReference: 'ζ_LS,reb,r = C_reb,r / (2√(K_w,r · m_s,r))',
+      'Allows the inside rear corner to extend more smoothly under corner-entry braking and roll, reducing transient rearward roll-transfer spikes so the inside rear keeps contact.',
+    equationReference: 'ΔFRSR_transient = (Δζ_bump,f · 0.22 - Δζ_reb,r · 0.18 + Δζ_reb,f · 0.08) · abruptness',
     secondaryTradeoff:
       'Slightly faster forward pitch rate on initial brake application.',
   },
@@ -415,6 +455,9 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'poor_traction_exit'],
     applicablePhases: ['exit'],
+    isApplicable: (setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' ||
+      (query.phase === 'exit' && setup.frontTorqueSplitPct < 100),
     buildPatch: (setup) => {
       if (setup.rearLsBumpClicks <= 3) return null;
       const next = Math.max(2, setup.rearLsBumpClicks - 3);
@@ -424,8 +467,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       };
     },
     physicalMechanism:
-      'Allows the rear suspension to compress progressively under corner-exit throttle squat, preventing a sudden vertical force spike that saturates the outside rear tire friction circle.',
-    equationReference: 'F_y,avail = √(F_max² - F_x²)',
+      'Allows the outside rear suspension to compress progressively under corner-exit roll and throttle squat, reducing transient rear lateral load transfer spikes that saturate the outside rear friction circle.',
+    equationReference: 'ΔFRSR_transient = (-Δζ_reb,f · 0.18 - Δζ_bump,r · 0.22) · abruptness',
     secondaryTradeoff:
       'Slightly more rear chassis squat under full acceleration.',
   },
@@ -437,6 +480,7 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['oversteer', 'instability_braking'],
     applicablePhases: ['entry'],
+    isApplicable: (setup) => setup.frontTorqueSplitPct < 100,
     buildPatch: (setup) => {
       if (setup.lsdDecelLockPct >= 80) return null;
       const next = Math.min(85, setup.lsdDecelLockPct + 15);
@@ -481,6 +525,9 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['oversteer', 'poor_traction_exit'],
     applicablePhases: ['entry', 'mid', 'exit'],
+    isApplicable: (setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' ||
+      (query.phase === 'exit' && setup.frontTorqueSplitPct < 100),
     buildPatch: (setup) => {
       const target = setup.optimalTirePressurePsi;
       if (Math.abs(target - setup.rearTirePressurePsi) < 0.2) return null;
@@ -532,6 +579,8 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'trackside',
     applicableSymptoms: ['mid_corner_bump_skittishness', 'poor_traction_exit', 'instability_braking'],
     applicablePhases: ['entry', 'mid', 'exit'],
+    isApplicable: (_setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' || query.phase === 'exit',
     buildPatch: (setup) => {
       const nextF = Math.max(1, setup.frontHsBumpClicks - 3);
       const nextR = Math.max(1, setup.rearHsBumpClicks - 3);
@@ -545,7 +594,7 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
       'Investigate a softer manufacturer-specific high-speed compression setting over bumps. This model uses an illustrative surface-efficiency modifier, not a measured damper curve or a contact-force time history.',
     equationReference: 'Illustrative surface modifier; measured damper force/velocity data required',
     secondaryTradeoff:
-      'Slightly increases bottoming risk over extreme compression dips if bump stops are short.',
+      'Slightly increases bottoming risk over extreme compression dips if bump stops are short, and going softer than the model HS compliance center (~7–8 clicks) can reduce platform control.',
   },
   {
     id: 'anti_geometry_tune_window',
@@ -555,9 +604,12 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     scope: 'shop',
     applicableSymptoms: ['instability_braking', 'poor_traction_exit', 'mid_corner_bump_skittishness'],
     applicablePhases: ['entry', 'exit'],
+    isApplicable: (setup, _driver, query) =>
+      query.symptom !== 'poor_traction_exit' ||
+      (query.phase === 'exit' && setup.frontTorqueSplitPct < 100),
     buildPatch: (setup, driver) => {
-      const targetAd = driver.cornerPhase === 'entry' ? Math.min(80, setup.frontAntiDivePct + 10) : setup.frontAntiDivePct;
-      const targetAs = driver.cornerPhase === 'exit' ? Math.min(80, setup.rearAntiSquatPct + 10) : setup.rearAntiSquatPct;
+      const targetAd = driver.cornerPhase === 'entry' ? Math.min(75, setup.frontAntiDivePct + 10) : setup.frontAntiDivePct;
+      const targetAs = driver.cornerPhase === 'exit' ? Math.min(75, setup.rearAntiSquatPct + 10) : setup.rearAntiSquatPct;
       if (targetAd === setup.frontAntiDivePct && targetAs === setup.rearAntiSquatPct) return null;
       return {
         directionLabel: `Set Anti-Dive ${setup.frontAntiDivePct}%→${targetAd}%, Anti-Squat ${setup.rearAntiSquatPct}%→${targetAs}%`,
@@ -566,7 +618,7 @@ const CANDIDATE_BLUEPRINTS: CandidateAdjustmentBlueprint[] = [
     },
     physicalMechanism:
       'At fixed acceleration, anti-geometry changes the longitudinal reaction carried by suspension links and springs, rather than total axle load transfer. This candidate explores a 10-point change in the model; it is not a universal optimal geometry setting.',
-    equationReference: '%AD = (Z_SVIC / X_SVIC) · (L / h_CG) · BFD × 100',
+    equationReference: '%AD = (Z_SVIC / X_SVIC) · (L / h_CG) · BFD × 100;  %AS_IRS = ((Z_SVIC - r_w) / X_SVIC) · (L / h_CG) · (1 - FwdSplit) × 100',
     secondaryTradeoff:
       'Actual compliance, jacking and wheel-hop behaviour require the vehicle geometry, force paths and transient measurements. No universal threshold is assumed.',
   },
@@ -588,13 +640,16 @@ export function solveDiagnosticRecommendations(
   const baselineSim = simulateVehicleState(setup, baselineDriver);
   const isBalanceQuery = query.symptom === 'understeer' || query.symptom === 'oversteer';
   const isTractionQuery = query.symptom === 'poor_traction_exit';
+  const isNonExitTractionQuery = isTractionQuery && query.phase !== 'exit';
   const baselineOutsideModel = hasUnsupportedContactState(baselineSim) ||
     (isBalanceQuery && baselineSim.warnings.some((warning) => warning.id === 'tire_saturation'));
-  const isCandidateOnly = (!isBalanceQuery && !isTractionQuery) || baselineOutsideModel;
+  const isCandidateOnly = (!isBalanceQuery && !isTractionQuery) || isNonExitTractionQuery || baselineOutsideModel;
   const evaluationBasis: NonNullable<RankedAdjustmentRecommendation['evaluationBasis']> =
     isCandidateOnly ? 'candidate_only' : isBalanceQuery ? 'balance_tendency' : 'traction_reserve_proxy';
   const objectiveLabel = baselineOutsideModel
     ? 'Requested state is outside the model’s contact / slip solution; no quantitative ranking'
+    : isNonExitTractionQuery
+    ? 'Driven-wheel exit traction is evaluated in Exit phase; switch to Exit for ranked guidance'
     : isBalanceQuery
     ? 'Illustrative balance toward neutral (points)'
     : isTractionQuery
@@ -609,14 +664,15 @@ export function solveDiagnosticRecommendations(
     const matchesSymptom = bp.applicableSymptoms.includes(query.symptom);
     const matchesPhase = bp.applicablePhases.includes(query.phase);
     const matchesScope = query.scopeFilter === 'all' || bp.scope === query.scopeFilter;
-    return matchesSymptom && matchesPhase && matchesScope;
+    const matchesRule = !bp.isApplicable || bp.isApplicable(setup, baselineDriver, query);
+    return matchesSymptom && matchesPhase && matchesScope && matchesRule;
   });
 
   const recommendations: RankedAdjustmentRecommendation[] = [];
   const baselineTractionLoss = isTractionQuery ? drivenWheelDemandRatio(baselineSim) : 0;
 
   for (const bp of filteredBlueprints) {
-    const patchSpec = bp.buildPatch(setup, baselineDriver);
+    const patchSpec = bp.buildPatch(setup, baselineDriver, baselineSim);
     if (!patchSpec) continue;
     if (!patchChangesValues(setup, patchSpec.setupPatch) &&
         !patchChangesValues(baselineDriver, patchSpec.driverPatch ?? {})) continue;

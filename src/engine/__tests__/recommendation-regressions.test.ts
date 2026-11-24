@@ -133,6 +133,135 @@ describe('Recommendation objectives and scenario consistency', () => {
       expect(demandRatio(after)).toBeLessThan(demandRatio(before));
     }
   });
+  it('verifies non-saturated understeer and oversteer recommendations across archetypes and phases', () => {
+    let understeerChecked = 0;
+    let oversteerChecked = 0;
+    const baseDriver = { ...DEFAULT_DRIVER_INPUT, lateralG: 0.85 };
+    const scenarios = [
+      ...Object.values(DRIVETRAIN_ARCHETYPES).map((arch) => ({
+        setup: arch.defaultSetup,
+        driver: baseDriver,
+      })),
+      // Stiff rear / soft front setup that cleanly exhibits controllable oversteer
+      {
+        setup: {
+          ...DRIVETRAIN_ARCHETYPES.FR.defaultSetup,
+          frontArbStiffnessNmPerDeg: 180,
+          rearArbStiffnessNmPerDeg: 850,
+          rearStaticCamberDeg: -0.6,
+          rearStaticToeDeg: 0,
+        },
+        driver: baseDriver,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      for (const phase of ['entry', 'mid', 'exit'] as const) {
+        const driver = { ...scenario.driver, cornerPhase: phase };
+        const before = simulateVehicleState(scenario.setup, driver);
+        for (const symptom of ['understeer', 'oversteer'] as const) {
+          const recs = solveDiagnosticRecommendations(scenario.setup, driver, {
+            symptom,
+            phase,
+            scopeFilter: 'all',
+          });
+          for (const rec of recs) {
+            if (rec.evaluationBasis !== 'balance_tendency') continue;
+            const after = simulateVehicleState(
+              { ...scenario.setup, ...rec.suggestedSetupPatch },
+              { ...driver, ...(rec.suggestedDriverPatch ?? {}) }
+            );
+            expect(Math.abs(after.balance.activeScore)).toBeLessThan(Math.abs(before.balance.activeScore));
+            expect(
+              symptom === 'understeer'
+                ? after.balance.activeScore < before.balance.activeScore
+                : after.balance.activeScore > before.balance.activeScore
+            ).toBe(true);
+            if (symptom === 'understeer') understeerChecked++;
+            else oversteerChecked++;
+          }
+        }
+      }
+    }
+    expect(understeerChecked).toBeGreaterThan(0);
+    expect(oversteerChecked).toBeGreaterThan(0);
+  });
+
+  it('handles trail-brake overlap cleanly at 25%, 60%, 65% and 80% without inverted labels', () => {
+    const setup = DRIVETRAIN_ARCHETYPES.RR.defaultSetup;
+    const rec25 = solveDiagnosticRecommendations(
+      setup,
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', trailBrakeOverlapPct: 25 },
+      { symptom: 'slow_turn_in_response', phase: 'entry', scopeFilter: 'all' }
+    ).find((r) => r.id === 'us_driver_trail_brake');
+    expect(rec25?.suggestedDriverPatch?.trailBrakeOverlapPct).toBe(45);
+    expect(rec25?.directionLabel).toContain('Increase');
+
+    const rec60 = solveDiagnosticRecommendations(
+      setup,
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', trailBrakeOverlapPct: 60 },
+      { symptom: 'slow_turn_in_response', phase: 'entry', scopeFilter: 'all' }
+    ).find((r) => r.id === 'us_driver_trail_brake');
+    expect(rec60).toBeUndefined();
+
+    for (const [overlap, expectedNext] of [
+      [65, 50],
+      [80, 65],
+    ] as const) {
+      const rec = solveDiagnosticRecommendations(
+        setup,
+        { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', trailBrakeOverlapPct: overlap },
+        { symptom: 'slow_turn_in_response', phase: 'entry', scopeFilter: 'all' }
+      ).find((r) => r.id === 'us_driver_trail_brake');
+      expect(rec?.suggestedDriverPatch?.trailBrakeOverlapPct).toBe(expectedNext);
+      expect(rec?.directionLabel).toContain('Reduce');
+      expect(rec?.directionLabel).not.toContain('Increase');
+    }
+  });
+
+  it('supports FF and AWD exit traction, prevents entry anti-dive leakage, and excludes FWD rear decel LSD or over-camber fixes', () => {
+    const ffDriver = { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'exit' as const, lateralG: 0.7, throttleG: 0.35 };
+    const ffRecs = solveDiagnosticRecommendations(
+      { ...DRIVETRAIN_ARCHETYPES.FF.defaultSetup, frontTirePressurePsi: 38 },
+      ffDriver,
+      { symptom: 'poor_traction_exit', phase: 'exit', scopeFilter: 'all' }
+    );
+    expect(ffRecs.length).toBeGreaterThan(0);
+    expect(ffRecs.every((r) => r.evaluationBasis === 'traction_reserve_proxy')).toBe(true);
+
+    const awdRecs = solveDiagnosticRecommendations(
+      { ...DRIVETRAIN_ARCHETYPES.AWD.defaultSetup, rearTirePressurePsi: 38 },
+      ffDriver,
+      { symptom: 'poor_traction_exit', phase: 'exit', scopeFilter: 'all' }
+    );
+    expect(awdRecs.length).toBeGreaterThan(0);
+    expect(awdRecs.every((r) => r.evaluationBasis === 'traction_reserve_proxy')).toBe(true);
+
+    const entryTractionRecs = solveDiagnosticRecommendations(
+      DRIVETRAIN_ARCHETYPES.RR.defaultSetup,
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', lateralG: 0.8 },
+      { symptom: 'poor_traction_exit', phase: 'entry', scopeFilter: 'all' }
+    );
+    expect(entryTractionRecs.some((r) => r.id === 'anti_geometry_tune_window')).toBe(false);
+
+    const ffEntryInstab = solveDiagnosticRecommendations(
+      DRIVETRAIN_ARCHETYPES.FF.defaultSetup,
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', lateralG: 0.7 },
+      { symptom: 'instability_braking', phase: 'entry', scopeFilter: 'all' }
+    );
+    expect(ffEntryInstab.some((r) => r.id === 'os_increase_lsd_decel_entry')).toBe(false);
+
+    const overCambered = solveDiagnosticRecommendations(
+      {
+        ...DRIVETRAIN_ARCHETYPES.RR.defaultSetup,
+        frontGeometry: 'double_wishbone',
+        frontStaticCamberDeg: -3.2,
+      },
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'mid', lateralG: 0.8 },
+      { symptom: 'slow_turn_in_response', phase: 'mid', scopeFilter: 'all' }
+    );
+    expect(overCambered.some((r) => r.id === 'us_increase_front_neg_camber')).toBe(false);
+  });
 });
 
 describe('Pinned setup comparisons and frequency feedback', () => {

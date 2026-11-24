@@ -51,8 +51,8 @@ export interface VehicleSetup {
   rearArbStiffnessNmPerDeg: number; // Added axle roll stiffness from rear ARB (Nm/deg)
 
   // 3. Kinematic & Pitch Geometry Parameters
-  frontRideHeightDeltaMm: number; // Change from nominal design ride height (-40 to +25 mm)
-  rearRideHeightDeltaMm: number; // Change from nominal design ride height (-40 to +25 mm)
+  frontRideHeightDeltaMm: number; // Change from nominal design ride height (UI: -35 to +20 mm)
+  rearRideHeightDeltaMm: number; // Change from nominal design ride height (UI: -35 to +20 mm)
   nominalFrontRollCenterMm: number; // z_rc,f at design ride height (mm)
   nominalRearRollCenterMm: number; // z_rc,r at design ride height (mm)
   frontStaticCamberDeg: number; // gamma_0,f (negative = top tilted in, e.g. -2.5 deg)
@@ -62,8 +62,8 @@ export interface VehicleSetup {
   frontCasterDeg: number; // nu (positive caster, e.g. 8.0 deg)
   frontKpiDeg: number; // Kingpin inclination / SAI (e.g. 12.5 deg)
   ackermannPct: number; // 100% = pure geometric Ackermann, 0% = parallel, <0% = anti-Ackermann
-  frontAntiDivePct: number; // %AD (0 to 80%)
-  rearAntiSquatPct: number; // %AS (0 to 80%)
+  frontAntiDivePct: number; // %AD (UI: 0 to 75%)
+  rearAntiSquatPct: number; // %AS (UI: 0 to 75%)
 
   // 4. Dampers (1 to 20 clicks; 10 = baseline nominal)
   frontLsBumpClicks: number;
@@ -95,11 +95,11 @@ export interface DriverInputState {
   cornerPhase: CornerPhase;
   turnDirection: 'left' | 'right';
   speedKmh: number; // Non-negative road speed; UI accepts 0–200 mph (0–321.87 km/h)
-  lateralG: number; // 0.3 to 1.5 g
-  brakingG: number; // 0.0 to 1.2 g (active in entry / trail-braking)
-  throttleG: number; // 0.0 to 0.8 g (active in exit)
+  lateralG: number; // UI: 0.5 to 1.4 g (engine supports >= 0)
+  brakingG: number; // UI: 0.1 to 1.15 g (active in entry / trail-braking)
+  throttleG: number; // UI: 0.05 to 0.75 g (active in exit)
   trailBrakeOverlapPct: number; // 0 to 100% (how deep braking is carried into turn-in)
-  driverSmoothnessPct: number; // 0% = abrupt / jerky inputs, 100% = smooth progressive inputs
+  driverSmoothnessPct: number; // UI: 15% = abrupt / jerky inputs, 100% = smooth progressive inputs
   surfaceCondition: SurfaceCondition;
 }
 
@@ -114,7 +114,7 @@ export interface WheelTelemetry {
   lateralFyDemandN: number;
   maxLateralFyAvailableN: number;
   maxTotalForceN: number;
-  gripUtilizationPct: number; // 0 to 150%
+  gripUtilizationPct: number; // Unbounded percentage (>= 0; >100% indicates saturation)
   dynamicCamberDeg: number;
   camberGainFromBumpDeg: number;
   camberGainFromSteerDeg: number;

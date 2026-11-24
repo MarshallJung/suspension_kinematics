@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_DRIVER_INPUT,
   DRIVETRAIN_ARCHETYPES,
+  calculateAeroDownforceN,
   calculateAntiDivePercentage,
   calculateAntiSquatPercentage,
   calculateFrontRollStiffnessRatio,
@@ -16,7 +17,7 @@ import {
 } from '../index';
 
 describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => {
-  it('preserves exact upright kingpin length and generates negative camber gain in Weierstrass arc-sphere solver', () => {
+  it('preserves exact upright kingpin length and generates negative camber gain in phase-form arc-sphere solver', () => {
     // Unequal-length double wishbone: shorter upper control arm (240mm) vs longer lower control arm (360mm)
     const lowerIn1 = { x: 150, y: 250, z: 180 };
     const lowerIn2 = { x: -150, y: 250, z: 180 };
@@ -77,7 +78,9 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
       motionRatioArb: 0.9,
       trackWidthMm: 1550,
     });
-    expect(arbLarge).toBeGreaterThan(arbSmall * 1.8);
+    const expectedArbRatio =
+      (Math.pow(28, 4) - Math.pow(12, 4)) / (Math.pow(24, 4) - Math.pow(12, 4));
+    expect(arbLarge / arbSmall).toBeCloseTo(expectedArbRatio, 10);
   });
 
   it('conserves total vertical load across all 4 tires across all archetypes and corner phases', () => {
@@ -95,9 +98,10 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
           sim.wheels.RR.dynamicFzN;
 
         const expectedTotalFz =
-          arch.defaultSetup.massKg * 9.81 + sim.kinematics.totalAeroDownforceN;
+          arch.defaultSetup.massKg * 9.81 +
+          calculateAeroDownforceN(arch.defaultSetup.aeroClA, driver.speedKmh);
 
-        expect(Math.abs(sumWheelFz - expectedTotalFz)).toBeLessThan(1.0);
+        expect(sumWheelFz).toBeCloseTo(expectedTotalFz, 6);
       }
     }
   });
@@ -110,16 +114,37 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
       cgHeightMm: 455,
       brakeBiasFrontFraction: 0.6,
     });
-    expect(adPct).toBeGreaterThan(25);
+    expect(adPct).toBeCloseTo((120 / 1400) * (2457 / 455) * 0.6 * 100, 10);
 
-    const asPct = calculateAntiSquatPercentage({
+    const asIrsPct = calculateAntiSquatPercentage({
+      rearSvicHeightMm: 440,
+      rearSvicLengthMm: 1600,
+      wheelbaseMm: 2457,
+      cgHeightMm: 455,
+      frontTorqueSplitFraction: 0,
+      loadedWheelRadiusMm: 330,
+    });
+    expect(asIrsPct).toBeCloseTo(((440 - 330) / 1600) * (2457 / 455) * 100, 10);
+
+    const proSquatIrsPct = calculateAntiSquatPercentage({
       rearSvicHeightMm: 110,
       rearSvicLengthMm: 1600,
       wheelbaseMm: 2457,
       cgHeightMm: 455,
       frontTorqueSplitFraction: 0,
+      loadedWheelRadiusMm: 330,
     });
-    expect(asPct).toBeGreaterThan(30);
+    expect(proSquatIrsPct).toBeCloseTo(((110 - 330) / 1600) * (2457 / 455) * 100, 10);
+
+    const asSolidAxlePct = calculateAntiSquatPercentage({
+      rearSvicHeightMm: 110,
+      rearSvicLengthMm: 1600,
+      wheelbaseMm: 2457,
+      cgHeightMm: 455,
+      frontTorqueSplitFraction: 0,
+      architecture: 'solid_axle',
+    });
+    expect(asSolidAxlePct).toBeCloseTo((110 / 1600) * (2457 / 455) * 100, 10);
 
     const baseSetup = DRIVETRAIN_ARCHETYPES.RR.defaultSetup;
     const entryDriver = { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry' as const, brakingG: 0.9 };
@@ -203,6 +228,7 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
       { ...baseSetup, rearStaticToeDeg: 0.45 },
       DEFAULT_DRIVER_INPUT
     );
+    expect(moreRearToeInSim.balance.entryScore).toBeGreaterThan(baseSim.balance.entryScore);
     expect(moreRearToeInSim.balance.midScore).toBeGreaterThan(baseSim.balance.midScore);
   });
 
@@ -271,8 +297,8 @@ describe('Suspension Kinematics & Vehicle Dynamics Deterministic Engine', () => 
       DEFAULT_DRIVER_INPUT
     );
 
-    expect(sim.kinematics.frontNaturalFreqHz).toBeCloseTo(2.4, 1);
-    expect(sim.kinematics.rearNaturalFreqHz).toBeCloseTo(2.6, 1);
+    expect(sim.kinematics.frontNaturalFreqHz).toBeCloseTo(2.4, 2);
+    expect(sim.kinematics.rearNaturalFreqHz).toBeCloseTo(2.6, 2);
 
     // Dynamic roll center migrates under heavy braking dive vs static roll center
     const heavyBrakeDriver = {

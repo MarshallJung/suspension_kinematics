@@ -14,7 +14,7 @@ export interface DamperAnalysis {
    */
   transientFrontLoadTransferShift: number;
   /**
-   * High-speed bump contact patch compliance factor (0.75 to 1.0) on bumpy surfaces.
+   * High-speed bump contact patch compliance factor (0.78 to 1.0) on bumpy surfaces.
    */
   frontBumpComplianceFactor: number;
   rearBumpComplianceFactor: number;
@@ -69,8 +69,9 @@ export function evaluateTransientDampers(
       abruptnessAmplifier;
   } else if (phase === 'exit') {
     // Corner Exit (Throttle Application + Unwinding Steer):
-    // Nose extends (Front LS Rebound) and Rear compresses (Rear LS Bump).
-    // Stiffer Front LS Rebound holds weight on the front nose longer (-shift -> reduces exit understeer).
+    // Outside front extends from cornering roll (Front LS Rebound) and Rear compresses (Rear LS Bump).
+    // Stiffer Front LS Rebound resists unwinding roll on the outside front, keeping elastic roll
+    // support biased rearward (-shift -> reduces exit understeer).
     // Stiffer Rear LS Bump spikes vertical load rate on outside rear tire (-shift -> more exit oversteer).
     const frontReboundDelta = frontLsReboundZeta - 0.40;
     const rearBumpDelta = rearLsBumpZeta - 0.39;
@@ -80,6 +81,8 @@ export function evaluateTransientDampers(
     // Mid-Corner (Apex steady-state): low-speed damper velocity approaches 0
     transientFrontLoadTransferShift = 0;
   }
+
+  transientFrontLoadTransferShift = Math.max(-0.12, Math.min(0.12, transientFrontLoadTransferShift));
 
   // High-Speed Bump & Anti-Geometry Compliance over Bumps/Curbs
   let bumpSeverity = 0;

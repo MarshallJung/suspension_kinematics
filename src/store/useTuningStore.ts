@@ -21,6 +21,11 @@ import {
   solveDiagnosticRecommendations,
   solveRideFrequencyTarget,
 } from '../engine';
+import {
+  PersistedTuningState,
+  loadPersistedState,
+  savePersistedState,
+} from './persistence';
 
 export type AppModeTab = 'wizard' | 'sandbox';
 export type ThemeMode = 'dark' | 'daylight';
@@ -30,10 +35,11 @@ export interface TuningStoreState {
   themeMode: ThemeMode;
   scopeFilter: 'all' | AdjustmentScope;
 
-  // Diagnostic Wizard state
+  // Diagnostic Wizard & comparison state
   selectedSymptom: HandlingSymptomType;
   selectedWheel: WheelId | null;
   previewRecommendationId: string | null;
+  viewingBaseline: boolean;
 
   // Current Setup & Driver Input
   setup: VehicleSetup;
@@ -58,6 +64,8 @@ export interface TuningStoreState {
   setSelectedSymptom: (symptom: HandlingSymptomType) => void;
   setCornerPhase: (phase: CornerPhase) => void;
   setSelectedWheel: (wheel: WheelId | null) => void;
+  setViewingBaseline: (viewing: boolean) => void;
+  toggleViewingBaseline: () => void;
 
   selectArchetype: (drivetrain: DrivetrainArchetype) => void;
   setFrontGeometry: (geom: SuspensionGeometryType) => void;
@@ -80,33 +88,47 @@ export interface TuningStoreState {
   applyRecommendation: (rec: RankedAdjustmentRecommendation) => void;
 }
 
-const initialSetup = { ...DRIVETRAIN_ARCHETYPES.RR.defaultSetup };
-const initialDriver = { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry' as CornerPhase };
+const persisted = loadPersistedState();
+const initialSetup = persisted?.setup
+  ? { ...persisted.setup }
+  : { ...DRIVETRAIN_ARCHETYPES.RR.defaultSetup };
+const initialDriver: DriverInputState = persisted?.driver
+  ? { ...persisted.driver }
+  : { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry' as CornerPhase };
+const initialScopeFilter = persisted?.scopeFilter ?? 'all';
 const initialSim = simulateVehicleState(initialSetup, initialDriver);
+const initialBaselineSetup =
+  persisted && 'baselineSetup' in persisted
+    ? persisted.baselineSetup ?? null
+    : { ...initialSetup };
+const initialPinnedBaseline = initialBaselineSetup
+  ? {
+      setup: { ...initialBaselineSetup },
+      driver: { ...initialDriver },
+      sim: simulateVehicleState(initialBaselineSetup, initialDriver),
+    }
+  : null;
 const initialRecs = solveDiagnosticRecommendations(initialSetup, initialDriver, {
   symptom: 'understeer',
   phase: initialDriver.cornerPhase,
-  scopeFilter: 'all',
+  scopeFilter: initialScopeFilter,
 });
 
 export const useTuningStore = create<TuningStoreState>((set, get) => ({
-  activeTab: 'sandbox',
-  themeMode: 'dark',
-  scopeFilter: 'all',
+  activeTab: persisted?.activeTab ?? 'sandbox',
+  themeMode: persisted?.themeMode ?? 'dark',
+  scopeFilter: initialScopeFilter,
 
   selectedSymptom: 'understeer',
   selectedWheel: 'FR',
   previewRecommendationId: null,
+  viewingBaseline: false,
 
   setup: initialSetup,
   driver: initialDriver,
   currentSim: initialSim,
   frequencyNotice: null,
-  pinnedBaseline: {
-    setup: initialSetup,
-    driver: initialDriver,
-    sim: initialSim,
-  },
+  pinnedBaseline: initialPinnedBaseline,
   recommendations: initialRecs,
 
   setActiveTab: (activeTab) => set({ activeTab, previewRecommendationId: null }),
@@ -164,6 +186,27 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
 
   setSelectedWheel: (selectedWheel) => set({ selectedWheel }),
 
+  setViewingBaseline: (viewing) => {
+    const hasBaseline = Boolean(get().pinnedBaseline);
+    set({
+      viewingBaseline: hasBaseline ? viewing : false,
+      ...(viewing && hasBaseline ? { previewRecommendationId: null } : {}),
+    });
+  },
+
+  toggleViewingBaseline: () => {
+    const { viewingBaseline, pinnedBaseline } = get();
+    if (!pinnedBaseline) {
+      if (viewingBaseline) set({ viewingBaseline: false });
+      return;
+    }
+    const nextViewing = !viewingBaseline;
+    set({
+      viewingBaseline: nextViewing,
+      ...(nextViewing ? { previewRecommendationId: null } : {}),
+    });
+  },
+
   selectArchetype: (drivetrain) => {
     const preset = DRIVETRAIN_ARCHETYPES[drivetrain];
     const nextSetup = { ...preset.defaultSetup };
@@ -185,6 +228,7 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
       },
       recommendations,
       previewRecommendationId: null,
+      viewingBaseline: false,
     });
   },
 
@@ -259,6 +303,7 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
       frequencyNotice: null,
       recommendations,
       previewRecommendationId: null,
+      viewingBaseline: false,
     });
   },
 
@@ -296,10 +341,11 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
         driver: { ...driver },
         sim: currentSim,
       },
+      viewingBaseline: false,
     });
   },
 
-  clearBaseline: () => set({ pinnedBaseline: null }),
+  clearBaseline: () => set({ pinnedBaseline: null, viewingBaseline: false }),
 
   revertToBaseline: () => {
     const { pinnedBaseline, driver, selectedSymptom, scopeFilter } = get();
@@ -319,6 +365,7 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
       frequencyNotice: null,
       recommendations,
       previewRecommendationId: null,
+      viewingBaseline: false,
     });
   },
 
@@ -328,7 +375,10 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
   },
 
   setPreviewRecommendationId: (previewRecommendationId) =>
-    set({ previewRecommendationId }),
+    set({
+      previewRecommendationId,
+      ...(previewRecommendationId ? { viewingBaseline: false } : {}),
+    }),
 
   applyRecommendation: (rec) => {
     const { setup, driver, selectedSymptom, scopeFilter, currentSim, pinnedBaseline } =
@@ -367,9 +417,33 @@ export const useTuningStore = create<TuningStoreState>((set, get) => ({
       frequencyNotice: null,
       recommendations,
       previewRecommendationId: null,
+      viewingBaseline: false,
     });
   },
 }));
+
+useTuningStore.subscribe((state, prevState) => {
+  if (
+    state.activeTab === prevState.activeTab &&
+    state.themeMode === prevState.themeMode &&
+    state.scopeFilter === prevState.scopeFilter &&
+    state.setup === prevState.setup &&
+    state.driver === prevState.driver &&
+    state.pinnedBaseline?.setup === prevState.pinnedBaseline?.setup
+  ) {
+    return;
+  }
+  const payload: PersistedTuningState = {
+    version: 1,
+    activeTab: state.activeTab,
+    themeMode: state.themeMode,
+    scopeFilter: state.scopeFilter,
+    setup: state.setup,
+    driver: state.driver,
+    baselineSetup: state.pinnedBaseline?.setup ?? null,
+  };
+  savePersistedState(payload);
+});
 
 function frequencyLimitNotice(
   axle: string,

@@ -16,13 +16,13 @@ Let `m` be total mass, `W = mg`, `wf` front static weight fraction, `L` wheelbas
 
 ```text
 Wf = wf W                          Wr = (1 − wf) W
-Entry: AxG = −brakingG × overlap/100
+Entry: AxG = −brakingG × overlap/100   (default entry overlap 25%)
 Apex:  AxG = 0
 Exit:  AxG = throttleG
 AyG = requested lateralG
 D = ½ ρ (CL A) v²                  ρ = 1.225 kg/m³
 Df = aeroFrontFraction × D         Dr = D − Df
-ΔFz,long = W × AxG × h/L
+ΔFz,long = W × AxG × h / max(1.5, L)
 Fz,f = Wf + Df − ΔFz,long
 Fz,r = Wr + Dr + ΔFz,long
 ```
@@ -92,19 +92,20 @@ Here `Gi` is the direct geometric moment at axle `i`, and `Ai` is that axle's se
 
 The `W hroll φ` term is the small-angle gravity moment from lateral CG displacement in this equivalent rigid-body approximation. The implementation uses total mass for the equivalent body; it does not separately solve sprung/unsprung roll dynamics. Its roll subsystem uses nominal axle lateral forces `W wf AyG` and `W (1 − wf) AyG`, rather than feeding the differential-induced yaw-allocation correction in section 6 back into roll. There is no unexplained `0.45` stiffness multiplier or minimum 40 mm roll arm.
 
-Because the assumed roll-centre profile changes with heave and roll, the engine iterates the equilibrium. Nonpositive effective stiffness, excessive roll for the small-angle approximation, or nonconvergence is reported as an invalid roll-equilibrium request.
+Because the assumed roll-centre profile changes with suspension heave and roll, the engine iterates the equilibrium. Suspension ride-height and heave articulation (`Δz_susp`) drive linkage RC migration and over-lowering thresholds, while tyre vertical heave shifts the CG and roll centres 1:1 relative to ground without articulating control arms. Nonpositive effective stiffness, excessive roll (`|φ| > 0.25 rad`) for the small-angle approximation, or nonconvergence saturates the fallback roll angle at `±0.25 rad` (rather than collapsing to zero) and flags the state as invalid (`roll_equilibrium`).
 
 For front elastic roll fraction `q`, let `Melastic = Kφ,total φ`:
 
 ```text
 Mground,f = q Melastic + Af Gf
 Mground,r = (1 − q) Melastic + Ar Gr
-ΔFz,lat,f = Mground,f / tf
-ΔFz,lat,r = Mground,r / tr
+ΔFz,lat,f = clamp(Mground,f / tf, ±0.5 Fz,f)
+ΔFz,lat,r = clamp(Mground,r / tr, ±0.5 Fz,r)
 TLLTDf = ΔFz,lat,f / (ΔFz,lat,f + ΔFz,lat,r)
+Fjack,i = (Wi AyG) × (2 ΔFz,lat,i / displayFz,i) × (zRC,i / (ti/2))
 ```
 
-In steady Apex, `q = FRSR`. Entry/Exit add a labelled illustrative damper shift, bounded to keep `q` in `[0,1]`. This adds equal/opposite changes to front/rear ground moments and preserves their sum. The geometric roll-centre reaction bypasses the main springs but still acts through tyre compliance; ARB reaction is not treated as main-spring force.
+In steady Apex, `q = FRSR`. Entry/Exit add a labelled illustrative damper shift (clamped to `[-0.12, 0.12]`), bounded to keep `q` in `[0,1]`. This adds equal/opposite changes to front/rear ground moments and preserves their sum. The geometric roll-centre reaction bypasses the main springs but still acts through tyre compliance; ARB reaction is not treated as main-spring force. Kinematic jacking uses the outside-minus-inside lateral force asymmetry on symmetric RC slopes so net jacking vanishes at zero load transfer.
 
 ### Corrected roll-axis example
 
@@ -142,7 +143,7 @@ outsideTravel,i = heaveTravel,i + rollTravel,i
 insideTravel,i  = heaveTravel,i − rollTravel,i
 ```
 
-The relative suspension-roll angle is chassis roll minus tyre roll. Thus geometric reaction affects tyre deflection and relative suspension angle, without being mislabelled as main-spring force. Dynamic camber uses this suspension travel plus the explicitly assumed geometry gains.
+The relative suspension-roll angle is chassis roll minus tyre roll. Thus geometric reaction affects tyre deflection and relative suspension angle, without being mislabelled as main-spring force. Dynamic camber uses `1.0 × φ` rigid-body roll relative to ground plus suspension bump camber gain from `wheelTravel` (`γ_dyn = γ_0 + (dγ/dz)_eff Δz_susp ± φ ± ν sin δ_geom + σ(1 − cos δ_geom)`), avoiding double-counting roll recovery (`rollCamberLossFactor` governs quadratic roll-centre drop, not a roll multiplier). Anti-squat for independent rear suspensions (`irs`, default `r_w = 330 mm`) uses `(Z_SVIC − r_w) / X_SVIC`, whereas `solid_axle` reacts at `z = 0`.
 
 ## 6. Tyre force demand, capacity and unloading
 
@@ -163,7 +164,7 @@ Fy,demand,r = m g AyG − Fy,demand,f
 
 This satisfies the selected planar yaw moment balance. Forces are treated in vehicle axes; a complete steered-tyre coordinate transformation and solved lateral/yaw state are not included. Tyre demands remain requests rather than forces guaranteed achievable by the available tyres.
 
-The project tyre illustration combines a load-sensitivity power law, a tyre-width nominal-load assumption, pressure/camber efficiency factors and a surface/compliance factor. The width exponent, nominal reference, efficiency curves and slip polynomials have no supplied experimental fit. A wider section is not a universal law for proportionally larger contact-patch area or tyre load rating. This is **not a fitted Pacejka Magic Formula model**.
+The project tyre illustration combines a strictly monotonic, globally concave load-sensitivity law (`μ_base(r) = μ_0 [0.5 ((r + 0.05)/1.05)^(-k_sens) + 0.5 (1 + 4.2 k_sens)/(1 + 4.2 k_sens r)]` for `r = Fz / Fz,nom,eff`), a tyre-width nominal-load assumption, pressure/camber efficiency factors (`-1.5°` outside / `-0.5°` inside cornering camber targets blended smoothly to `0°` at `0g` lateral via `min(1, |AyG|/0.35)` for straight-line symmetry) and a surface/compliance factor. LSD deceleration redistribution applies only to driven axles (hydraulic caliper braking does not cross-couple non-driven axles), and lifted wheels (`Fz = 0`) receive zero `Fx`. Toe, Ackermann and LSD slip-angle modifiers vanish smoothly at `0g` lateral (`understeerGradientDegPerG = 0` at `AyG = 0`). The width exponent, nominal reference, efficiency curves and slip polynomials have no supplied experimental fit. A wider section is not a universal law for proportionally larger contact-patch area or tyre load rating. This is **not a fitted Pacejka Magic Formula model**.
 
 With the selected isotropic friction-circle estimate:
 
@@ -173,15 +174,15 @@ Fy,reserve = √max(0, Fmax² − Fx,demand²)
 u = √(Fx,demand² + Fy,demand²) / Fmax
 ```
 
-There is no minimum 20% lateral reserve when longitudinal demand already exceeds capacity. Utilization can exceed 100%; saturation is reported. At `Fz = 0`, capacity is zero and utilization is displayed as unloaded/undefined, not usable grip. Slip curves are bounded illustrations; saturation does not produce a solved steady sliding angle.
+There is no minimum 20% lateral reserve when longitudinal demand already exceeds capacity. Utilization (`100 × u`, stored numerically as `0` when `Fmax <= 0`) can exceed 100%; saturation is reported. At `Fz = 0`, capacity is zero and the UI displays `"Unloaded"`, not usable grip. Slip curves are bounded illustrations; saturation does not produce a solved steady sliding angle.
 
-At ordinary four-contact states, per-axle normal load is split as `Fz,axle/2 ± ΔFz,lat`. If this requests a negative contact load, the display sets the unloaded corner to zero and marks the request outside the four-contact model. Axle-lift display loads are renormalized to preserve the total normal load. These display limits are not a solved three-contact/rollover response and cannot establish that the requested acceleration is achievable.
+At ordinary four-contact states, per-axle normal load is split as `Fz,axle/2 ± ΔFz,lat` with total normal load bounded at `max(0, W + D)`. If this requests a negative contact load, the display sets the unloaded corner to zero and marks the request outside the four-contact model. Axle-lift display loads are renormalized to preserve the total non-negative normal load. These display limits are not a solved three-contact/rollover response and cannot establish that the requested acceleration is achievable.
 
 ## 7. Illustrative geometry and damper profiles
 
-Live camber and roll-centre calculations use the generic profiles in `archetypes.ts`. Their camber gains, roll-loss factors, migration rates and lowering thresholds are **assumptions**. They are not inferred from the suspension-type name, and the standalone spatial solver is not wired into live telemetry. Measured hardpoints or validated travel/steer tables are required for a vehicle-specific geometry model.
+Live camber and roll-centre calculations use the generic profiles in `archetypes.ts` (bump camber gains `-0.015`, `-0.052`, `-0.044` deg/mm). Their camber gains, roll-centre loss factors, migration rates and lowering thresholds are **assumptions**. They are not inferred from the suspension-type name, and the standalone spatial solver is not wired into live telemetry. Measured hardpoints or validated travel/steer tables are required for a vehicle-specific geometry model.
 
-`transientDampers.ts` maps generic 1–20 settings to a firmness/damping-ratio illustration and phase-based load-distribution/compliance modifiers. More clicks means firmer **within this model**; actual damper adjustment conventions and force/velocity curves vary. There is no time integration, wheel-hop calculation, yaw-response transient, measured shaft velocity, damper temperature or manufacturer calibration.
+`transientDampers.ts` maps generic 1–20 settings to a firmness/damping-ratio illustration, a phase-based load-distribution shift clamped to `[-0.12, 0.12]` and a bumpy-surface compliance factor clamped to `[0.78, 1.0]`. More clicks means firmer **within this model**; actual damper adjustment conventions and force/velocity curves vary. There is no time integration, wheel-hop calculation, yaw-response transient, measured shaft velocity, damper temperature or manufacturer calibration.
 
 No universal 25–35% anti-geometry optimum or binding threshold is established. Any remaining numeric threshold inside a generic compliance modifier is a project assumption with no claim of general physical applicability.
 
@@ -193,9 +194,9 @@ The wishbone helper intersects the upper ball-joint circle with the sphere centr
 A cos(θupper) + B sin(θupper) + C = 0
 ```
 
-The phase solution `R cos(θupper − atan2(B,A)) = −C`, with `R = hypot(A,B)`, covers the ordinary intersection, tangency, the former half-angle linear case, and the solution at `θ = π`. Feasibility, degenerate axes and finite inputs are checked. The closest periodic solution to the supplied preceding angle follows the assembly branch. A solved result must satisfy the upright-length residual tolerance. Underdetermined intersections are identified; infeasible states do not return fabricated geometry.
+The phase solution `R cos(θupper − atan2(B,A)) = −C`, with `R = hypot(A,B)`, covers the ordinary intersection, tangency, the former half-angle linear case, and the solution at `θ = π`. Tolerance scales with squared linkage dimensions for unit invariance, feasibility and degenerate axes are checked, and front-view kingpin inclination change adapts automatically to left (`-y`) vs right (`+y`) outboard side. The closest periodic solution to the supplied preceding angle follows the assembly branch. A solved result must satisfy the upright-length residual tolerance. Underdetermined intersections are identified; infeasible states do not return fabricated geometry.
 
-Recommendation ranking uses the same visible setup, phase, surface and driver scenario as Preview/Apply. No-op patches are excluded. Understeer/oversteer guidance ranks a signed improvement toward neutral in the illustrative balance score; a patch that worsens the symptom or overshoots the opposite limit is excluded. Exit-traction guidance uses a declared worst-driven-wheel demand/capacity proxy. Turn-in response, transient braking stability and bump-contact-force variation are not simulated objectives; related guidance remains unranked investigation candidates. Internal ordering scores are never probabilities.
+Recommendation ranking uses the same visible setup, phase, surface and driver scenario as Preview/Apply. No-op patches, over-cambered corners (`dynamicCamberDeg <= -1.6°`), and FWD rear-LSD decel entries are excluded. Understeer/oversteer guidance ranks a signed improvement toward neutral in the illustrative balance score when within the four-contact/non-saturated model (falling back to unranked `candidate_only` when saturated or lifted); a patch that worsens the symptom or overshoots the opposite limit is excluded during ranked evaluation. Exit-traction guidance evaluates driven-wheel demand/capacity only in the `Exit` phase (`candidate_only` otherwise). Turn-in response, transient braking stability and bump-contact-force variation are not simulated objectives; related guidance remains unranked investigation candidates. Internal ordering scores are never probabilities.
 
 ## 9. Traceability and validation boundary
 

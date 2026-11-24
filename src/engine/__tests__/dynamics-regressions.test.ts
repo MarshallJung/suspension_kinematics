@@ -3,6 +3,7 @@ import { DEFAULT_DRIVER_INPUT, DRIVETRAIN_ARCHETYPES } from '../archetypes';
 import { calculateRideRateNmm, degToRad } from '../kinematics';
 import { phaseAccelerations, solveLoadTransfer } from '../loadTransfer';
 import { evaluatePhaseMechanics, simulateVehicleState } from '../tireModel';
+import { clicksToDampingRatio, evaluateTransientDampers } from '../transientDampers';
 import { CornerPhase, VehicleSetup } from '../types';
 
 const base = DRIVETRAIN_ARCHETYPES.RR.defaultSetup;
@@ -179,5 +180,206 @@ describe('independent dynamics conservation and operating-limit regressions', ()
         expect(left.wheels[a].longitudinalFxN).toBeCloseTo(right.wheels[b].longitudinalFxN, 8);
       }
     }
+  });
+
+  it('maintains strictly monotonic and concave tire peak force across load ratios', () => {
+    // Use stiff springs & positive nominal ride height to isolate tire load sensitivity from over-lowering camber artifacts
+    const setup: VehicleSetup = {
+      ...base,
+      frontSpringRateNmm: 320,
+      rearSpringRateNmm: 320,
+      frontMotionRatio: 1.0,
+      rearMotionRatio: 1.0,
+      frontRideHeightDeltaMm: 20,
+      rearRideHeightDeltaMm: 20,
+      frontStaticCamberDeg: 0,
+      rearStaticCamberDeg: 0,
+      frontTirePressurePsi: base.optimalTirePressurePsi,
+      rearTirePressurePsi: base.optimalTirePressurePsi,
+      aeroFrontBalancePct: 50,
+    };
+    const fMaxAt = (aeroClA: number, speedKmh: number) => {
+      const sim = simulateVehicleState(
+        { ...setup, aeroClA },
+        { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'mid', lateralG: 0, brakingG: 0, throttleG: 0, speedKmh }
+      );
+      return { fz: sim.wheels.FR.dynamicFzN, fMax: sim.wheels.FR.maxTotalForceN };
+    };
+    const samples = [0, 0.5, 1.5, 3, 5, 7, 9, 12, 16].map((clA) => fMaxAt(clA, 220));
+    for (let i = 1; i < samples.length; i++) {
+      expect(samples[i].fz).toBeGreaterThan(samples[i - 1].fz);
+      expect(samples[i].fMax).toBeGreaterThan(samples[i - 1].fMax);
+      const slopePrev =
+        i === 1
+          ? samples[1].fMax / samples[1].fz
+          : (samples[i - 1].fMax - samples[i - 2].fMax) / (samples[i - 1].fz - samples[i - 2].fz);
+      const slopeCurr = (samples[i].fMax - samples[i - 1].fMax) / (samples[i].fz - samples[i - 1].fz);
+      expect(slopeCurr).toBeLessThan(slopePrev);
+    }
+
+    // Zero load sensitivity produces exact constant baseLoadSensitiveMu = peakFrictionCoefficient under heavy downforce
+    const zeroSens = simulateVehicleState(
+      { ...setup, tireLoadSensitivityExponent: 0, aeroClA: 4 },
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'mid', lateralG: 0, brakingG: 0, throttleG: 0, speedKmh: 200 }
+    );
+    const camberFactor = 1 - 0.012 * Math.pow(zeroSens.wheels.FR.dynamicCamberDeg, 2);
+    expect(zeroSens.wheels.FR.effectiveFrictionMu).toBeCloseTo(
+      setup.peakFrictionCoefficient * camberFactor,
+      10
+    );
+  });
+
+  it('preserves strict left/right symmetry, zero roll, zero jacking and zero balance bias at 0g lateral', () => {
+    for (const archetype of Object.values(DRIVETRAIN_ARCHETYPES)) {
+      for (const phase of phases) {
+        const driver = { ...DEFAULT_DRIVER_INPUT, cornerPhase: phase, lateralG: 0 };
+        const sim = simulateVehicleState(archetype.defaultSetup, driver);
+        expect(sim.kinematics.bodyRollDeg).toBe(0);
+        expect(sim.kinematics.frontJackingForceN).toBe(0);
+        expect(sim.kinematics.rearJackingForceN).toBe(0);
+        expect(sim.kinematics.understeerGradientDegPerG).toBe(0);
+        expect(sim.balance.activeScore).toBe(0);
+        expect(sim.wheels.FL.dynamicFzN).toBeCloseTo(sim.wheels.FR.dynamicFzN, 9);
+        expect(sim.wheels.RL.dynamicFzN).toBeCloseTo(sim.wheels.RR.dynamicFzN, 9);
+        expect(sim.wheels.FL.effectiveFrictionMu).toBeCloseTo(sim.wheels.FR.effectiveFrictionMu, 9);
+        expect(sim.wheels.RL.effectiveFrictionMu).toBeCloseTo(sim.wheels.RR.effectiveFrictionMu, 9);
+        expect(sim.wheels.FL.maxTotalForceN).toBeCloseTo(sim.wheels.FR.maxTotalForceN, 9);
+        expect(sim.wheels.FL.camberGainFromSteerDeg).toBe(0);
+        expect(sim.wheels.FR.camberGainFromSteerDeg).toBe(0);
+      }
+    }
+  });
+
+  it('computes differential jacking force and restricts LSD decel lock to driven axles and grounded wheels', () => {
+    const load = solveLoadTransfer(base, { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'mid', lateralG: 0.9 });
+    const frontExpectedJack =
+      load.frontStaticAxleFzN *
+      0.9 *
+      ((2 * load.frontLateralLoadTransferN) / (load.wheelDynamicFzN.FL + load.wheelDynamicFzN.FR)) *
+      (load.effectiveFrontRollCenterMm / (0.5 * base.frontTrackMm));
+    expect(load.frontJackingForceN).toBeCloseTo(frontExpectedJack, 8);
+    expect(Math.abs(load.frontJackingForceN)).toBeLessThan(
+      Math.abs(load.frontStaticAxleFzN * 0.9 * (load.effectiveFrontRollCenterMm / (0.5 * base.frontTrackMm)))
+    );
+
+    // RR has frontTorqueSplitPct = 0: front hydraulic braking must remain 50/50 even at 90% decel lock
+    const rrEntry = evaluatePhaseMechanics(
+      { ...base, lsdDecelLockPct: 90 },
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', lateralG: 0.7, brakingG: 0.8, trailBrakeOverlapPct: 100 },
+      'entry'
+    );
+    expect(rrEntry.wheels.FL.longitudinalFxN).toBeCloseTo(rrEntry.wheels.FR.longitudinalFxN, 8);
+    expect(Math.abs(rrEntry.wheels.RR.longitudinalFxN)).toBeGreaterThan(Math.abs(rrEntry.wheels.RL.longitudinalFxN));
+
+    // FF at heavy entry lifts RL (Fz = 0): lifted wheel must carry zero longitudinal Fx and rear grounded share is 100%
+    const ffLift = evaluatePhaseMechanics(
+      DRIVETRAIN_ARCHETYPES.FF.defaultSetup,
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', lateralG: 1.4, brakingG: 1.0, trailBrakeOverlapPct: 100 },
+      'entry'
+    );
+    expect(ffLift.wheels.RL.dynamicFzN).toBe(0);
+    expect(ffLift.wheels.RL.longitudinalFxN).toBe(0);
+    expect(ffLift.wheels.RR.longitudinalFxN).toBeLessThan(0);
+  });
+
+  it('handles axle lift, extreme aero lift, failed roll equilibrium without inverted transfer, and exit anti-squat invariance', () => {
+    // Extreme braking triggers axleLiftRequested while conserving total normal load
+    const axleLiftLoad = solveLoadTransfer(
+      { ...base, cgHeightMm: 950, wheelbaseMm: 1600, aeroClA: 0 },
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', lateralG: 0.2, brakingG: 1.2, trailBrakeOverlapPct: 100 }
+    );
+    expect(axleLiftLoad.axleLiftRequested).toBe(true);
+    expect(axleLiftLoad.wheelLiftRequested).toBe(true);
+    expect(sum(Object.values(axleLiftLoad.wheelDynamicFzN))).toBeCloseTo(axleLiftLoad.totalStaticWeightN, 6);
+
+    // Extreme negative aero lift (upward lift > weight) never produces negative wheel loads
+    const aeroLiftLoad = solveLoadTransfer(
+      { ...base, aeroClA: -6.0 },
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'mid', speedKmh: 300, lateralG: 0.5 }
+    );
+    expect(aeroLiftLoad.axleLiftRequested).toBe(true);
+    for (const fz of Object.values(aeroLiftLoad.wheelDynamicFzN)) {
+      expect(fz).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(fz)).toBe(true);
+    }
+
+    // Min-stiffness + over-lowered + max-lateral input triggers roll_equilibrium without inverting FL > FR
+    const minStiffSim = simulateVehicleState(
+      {
+        ...base,
+        frontSpringRateNmm: 25,
+        rearSpringRateNmm: 25,
+        frontMotionRatio: 0.55,
+        rearMotionRatio: 0.55,
+        frontArbStiffnessNmPerDeg: 80,
+        rearArbStiffnessNmPerDeg: 60,
+        frontRideHeightDeltaMm: -35,
+        rearRideHeightDeltaMm: -35,
+        cgHeightMm: 580,
+      },
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'mid', lateralG: 1.4, speedKmh: 0 }
+    );
+    expect(minStiffSim.warnings.some((w) => w.id === 'roll_equilibrium')).toBe(true);
+    expect(minStiffSim.kinematics.bodyRollDeg).toBeGreaterThan(0);
+    expect(minStiffSim.wheels.FR.dynamicFzN).toBeGreaterThanOrEqual(minStiffSim.wheels.FL.dynamicFzN);
+
+    // Single-axle wheel lift keeps totalLateralLoadTransferDistributionFront consistent with clamped transfers
+    const singleLift = solveLoadTransfer(
+      DRIVETRAIN_ARCHETYPES.FF.defaultSetup,
+      { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'entry', lateralG: 1.3, brakingG: 0.9, trailBrakeOverlapPct: 100 }
+    );
+    expect(singleLift.wheelLiftRequested).toBe(true);
+    expect(singleLift.totalLateralLoadTransferDistributionFront).toBeCloseTo(
+      singleLift.frontLateralLoadTransferN /
+        (singleLift.frontLateralLoadTransferN + singleLift.rearLateralLoadTransferN),
+      10
+    );
+
+    // Exit anti-squat invariance on axle vertical loads while reducing squat pitch
+    const exitDriver = { ...DEFAULT_DRIVER_INPUT, cornerPhase: 'exit' as const, throttleG: 0.75, lateralG: 0.5 };
+    const lowAs = solveLoadTransfer({ ...base, rearAntiSquatPct: 0 }, exitDriver, 'exit');
+    const highAs = solveLoadTransfer({ ...base, rearAntiSquatPct: 60 }, exitDriver, 'exit');
+    expect(highAs.longitudinalLoadTransferN).toBeCloseTo(lowAs.longitudinalLoadTransferN, 8);
+    expect(highAs.wheelDynamicFzN.FL + highAs.wheelDynamicFzN.FR).toBeCloseTo(
+      lowAs.wheelDynamicFzN.FL + lowAs.wheelDynamicFzN.FR,
+      8
+    );
+    expect(highAs.wheelDynamicFzN.RL + highAs.wheelDynamicFzN.RR).toBeCloseTo(
+      lowAs.wheelDynamicFzN.RL + lowAs.wheelDynamicFzN.RR,
+      8
+    );
+    expect(highAs.bodyPitchDeg).toBeLessThan(lowAs.bodyPitchDeg);
+
+    // At 0g lateral, all 4 wheel loads are strictly invariant to rearAntiSquatPct
+    const straightExit = { ...exitDriver, lateralG: 0 };
+    const lowAsStraight = solveLoadTransfer({ ...base, rearAntiSquatPct: 0 }, straightExit, 'exit');
+    const highAsStraight = solveLoadTransfer({ ...base, rearAntiSquatPct: 60 }, straightExit, 'exit');
+    expect(highAsStraight.wheelDynamicFzN).toEqual(lowAsStraight.wheelDynamicFzN);
+  });
+
+  it('bounds transient damper shifts and bump compliance within documented envelopes', () => {
+    expect(clicksToDampingRatio(10, 120, 80)).toBeLessThan(clicksToDampingRatio(10, 60, 80));
+
+    const mid = evaluateTransientDampers(
+      { ...base, frontLsBumpClicks: 20, rearLsReboundClicks: 1 },
+      { ...DEFAULT_DRIVER_INPUT, driverSmoothnessPct: 0, surfaceCondition: 'curbs_and_bumps' },
+      80,
+      100,
+      'mid'
+    );
+    expect(mid.transientFrontLoadTransferShift).toBe(0);
+    expect(mid.frontBumpComplianceFactor).toBeGreaterThanOrEqual(0.78);
+    expect(mid.frontBumpComplianceFactor).toBeLessThanOrEqual(1.0);
+
+    const extremeEntry = evaluateTransientDampers(
+      { ...base, frontLsBumpClicks: 20, frontLsReboundClicks: 20, rearLsReboundClicks: 1, frontHsBumpClicks: 20 },
+      { ...DEFAULT_DRIVER_INPUT, driverSmoothnessPct: 0, surfaceCondition: 'curbs_and_bumps' },
+      60,
+      80,
+      'entry'
+    );
+    expect(extremeEntry.transientFrontLoadTransferShift).toBeLessThanOrEqual(0.12);
+    expect(extremeEntry.transientFrontLoadTransferShift).toBeGreaterThanOrEqual(-0.12);
+    expect(extremeEntry.frontBumpComplianceFactor).toBeGreaterThanOrEqual(0.78);
   });
 });

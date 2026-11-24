@@ -70,7 +70,7 @@ export function SymptomWizardScreen({ theme, onPreview }: SymptomWizardScreenPro
           </Pressable>
         </View>
         <Pressable accessibilityRole="button" aria-expanded={expanded === rec.id} accessibilityState={{ expanded: expanded === rec.id }}
-          onPress={() => setExpanded(expanded === rec.id ? null : rec.id)} style={{ paddingTop: 13 }}>
+          onPress={() => setExpanded(expanded === rec.id ? null : rec.id)} style={styles.whyBtn}>
           <Text style={{ color: theme.textMuted, fontSize: 11 }}>{expanded === rec.id ? 'Hide' : 'Why this change?'}{expanded !== rec.id ? '  /  mechanism & tradeoffs' : ''}</Text>
         </Pressable>
         {expanded === rec.id && <View style={[styles.explanation, { borderColor: theme.borderSubtle }]}>
@@ -86,10 +86,11 @@ export function SymptomWizardScreen({ theme, onPreview }: SymptomWizardScreenPro
 const styles = StyleSheet.create({
   container: { gap: 16 }, section: { gap: 12 }, eyebrow: { fontSize: 9, fontWeight: '700', letterSpacing: 1.4 },
   symptoms: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, symptom: { flexBasis: '45%', flexGrow: 1, padding: 13, borderWidth: 1, borderRadius: 8 },
-  filter: { flexDirection: 'row', gap: 5 }, filterButton: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 6 },
+  filter: { flexDirection: 'row', gap: 5 }, filterButton: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 6 },
   listTitle: { fontSize: 17, fontWeight: '600' }, caption: { fontSize: 11, lineHeight: 18, marginTop: 5 },
   recommendation: { borderWidth: 1, borderRadius: 12, padding: 19 }, recHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
   recTitle: { fontSize: 15, fontWeight: '600', lineHeight: 22 }, direction: { fontSize: 12, lineHeight: 19, marginTop: 7, marginBottom: 5 },
-  actions: { flexDirection: 'row', gap: 8, marginTop: 17 }, action: { flex: 1, padding: 10, borderWidth: 1, borderRadius: 7, alignItems: 'center' },
+  actions: { flexDirection: 'row', gap: 8, marginTop: 17 }, action: { flex: 1, minHeight: 44, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderRadius: 7, alignItems: 'center', justifyContent: 'center' },
+  whyBtn: { minHeight: 44, justifyContent: 'center', alignSelf: 'flex-start', paddingTop: 4 },
   explanation: { marginTop: 14, paddingTop: 10, borderTopWidth: 1 }, empty: { borderWidth: 1, borderRadius: 8, padding: 18, fontSize: 13, lineHeight: 21 },
 });

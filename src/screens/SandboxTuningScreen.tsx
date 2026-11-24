@@ -121,11 +121,12 @@ export const SandboxTuningScreen: React.FC<SandboxTuningScreenProps> = ({
           })}
         </View>
 
-        <View style={styles.categoryRow}>
+        <View accessibilityRole="tablist" style={styles.categoryRow}>
           {CATEGORIES.map((cat) => {
             const active = activeCategory === cat.id;
             return (
-              <Pressable accessibilityRole="button"
+              <Pressable accessibilityRole="tab"
+                aria-selected={active}
                 key={cat.id}
                 onPress={() => setActiveCategory(cat.id)}
                 accessibilityState={{ selected: active }}
@@ -920,8 +921,10 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   pillBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 7,
     borderWidth: 1,
   },
@@ -932,11 +935,13 @@ const styles = StyleSheet.create({
   categoryRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 8,
   },
   catBtn: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    minHeight: 44,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 8,
     borderWidth: 1,
   },
